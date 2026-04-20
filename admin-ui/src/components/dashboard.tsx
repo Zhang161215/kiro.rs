@@ -15,6 +15,7 @@ import { BatchVerifyDialog, type VerifyResult } from '@/components/batch-verify-
 import { RequestDetailsPanel } from '@/components/request-details-panel'
 import { useCredentials, useDeleteCredential, useResetFailure, useLoadBalancingMode, useSetLoadBalancingMode, useKvCacheConfig, useSetKvCacheConfig } from '@/hooks/use-credentials'
 import { getCredentialBalance, forceRefreshToken } from '@/api/credentials'
+import type { KvCacheConfig } from '@/api/credentials'
 import { extractErrorMessage } from '@/lib/utils'
 import type { BalanceResponse } from '@/types/api'
 
@@ -792,63 +793,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
         ) : activeTab === 'details' ? (
           <RequestDetailsPanel />
         ) : (
-          <div className="space-y-6">
-            <h2 className="text-lg font-semibold">KV Cache 配置</h2>
-            <div className="grid gap-6 md:grid-cols-2">
-              <Card>
-                <CardHeader>
-                  <CardTitle className="text-sm font-medium">缓存效率系数</CardTitle>
-                  <p className="text-xs text-muted-foreground">
-                    控制模拟缓存命中率。0.87 表示将 ~98% 的前缀匹配折算为 ~85% 的实际缓存率
-                  </p>
-                </CardHeader>
-                <CardContent>
-                  <div className="flex items-center gap-4">
-                    <input
-                      type="range"
-                      min="50"
-                      max="100"
-                      value={Math.round((kvCacheConfig?.cacheReadEfficiency ?? 0.87) * 100)}
-                      onChange={(e) => {
-                        const val = parseInt(e.target.value) / 100
-                        setKvCacheConfig({ cacheReadEfficiency: val })
-                      }}
-                      className="flex-1"
-                    />
-                    <span className="text-2xl font-bold w-20 text-right">
-                      {Math.round((kvCacheConfig?.cacheReadEfficiency ?? 0.87) * 100)}%
-                    </span>
-                  </div>
-                </CardContent>
-              </Card>
-              <Card>
-                <CardHeader>
-                  <CardTitle className="text-sm font-medium">缓存 TTL</CardTitle>
-                  <p className="text-xs text-muted-foreground">
-                    历史 prompt 在内存中的存活时间，超时后不再参与前缀匹配
-                  </p>
-                </CardHeader>
-                <CardContent>
-                  <div className="flex items-center gap-4">
-                    <input
-                      type="number"
-                      min="60"
-                      max="86400"
-                      value={kvCacheConfig?.kvCacheTtlSecs ?? 3600}
-                      onChange={(e) => {
-                        const val = parseInt(e.target.value) || 3600
-                        setKvCacheConfig({ kvCacheTtlSecs: Math.max(60, val) })
-                      }}
-                      className="flex-1 h-10 rounded-md border border-input bg-background px-3 text-sm"
-                    />
-                    <span className="text-sm text-muted-foreground whitespace-nowrap">
-                      = {Math.round((kvCacheConfig?.kvCacheTtlSecs ?? 3600) / 60)} 分钟
-                    </span>
-                  </div>
-                </CardContent>
-              </Card>
-            </div>
-          </div>
+          <KvCacheSettings kvCacheConfig={kvCacheConfig} setKvCacheConfig={setKvCacheConfig} />
         )}
       </main>
 
@@ -886,6 +831,114 @@ export function Dashboard({ onLogout }: DashboardProps) {
         results={verifyResults}
         onCancel={handleCancelVerify}
       />
+    </div>
+  )
+}
+
+function KvCacheSettings({ kvCacheConfig, setKvCacheConfig }: {
+  kvCacheConfig: KvCacheConfig | undefined
+  setKvCacheConfig: (config: Partial<KvCacheConfig>) => void
+}) {
+  const [efficiency, setEfficiency] = useState(87)
+  const [ttl, setTtl] = useState(3600)
+  const [dirty, setDirty] = useState(false)
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    if (kvCacheConfig) {
+      setEfficiency(Math.round(kvCacheConfig.cacheReadEfficiency * 100))
+      setTtl(kvCacheConfig.kvCacheTtlSecs)
+      setDirty(false)
+    }
+  }, [kvCacheConfig])
+
+  const handleSave = () => {
+    setSaving(true)
+    setKvCacheConfig({
+      cacheReadEfficiency: efficiency / 100,
+      kvCacheTtlSecs: Math.max(60, ttl),
+    })
+    setTimeout(() => {
+      setSaving(false)
+      setDirty(false)
+      toast.success('KV Cache 配置已保存')
+    }, 300)
+  }
+
+  const handleReset = () => {
+    if (kvCacheConfig) {
+      setEfficiency(Math.round(kvCacheConfig.cacheReadEfficiency * 100))
+      setTtl(kvCacheConfig.kvCacheTtlSecs)
+      setDirty(false)
+    }
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <h2 className="text-lg font-semibold">KV Cache 配置</h2>
+        <div className="flex items-center gap-2">
+          {dirty && (
+            <Button variant="outline" size="sm" onClick={handleReset}>
+              取消
+            </Button>
+          )}
+          <Button size="sm" onClick={handleSave} disabled={!dirty || saving}>
+            {saving ? '保存中...' : '保存配置'}
+          </Button>
+        </div>
+      </div>
+      <div className="grid gap-6 md:grid-cols-2">
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm font-medium">缓存效率系数</CardTitle>
+            <p className="text-xs text-muted-foreground">
+              控制模拟缓存命中率。例如 87% 表示将前缀匹配折算为 ~85% 的实际缓存率
+            </p>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <input
+              type="range"
+              min="50"
+              max="100"
+              step="1"
+              value={efficiency}
+              onChange={(e) => { setEfficiency(parseInt(e.target.value)); setDirty(true) }}
+              className="w-full h-2 bg-secondary rounded-lg appearance-none cursor-pointer accent-primary"
+            />
+            <div className="flex justify-between text-xs text-muted-foreground">
+              <span>50%</span>
+              <span className="text-lg font-bold text-foreground">{efficiency}%</span>
+              <span>100%</span>
+            </div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm font-medium">缓存 TTL</CardTitle>
+            <p className="text-xs text-muted-foreground">
+              历史 prompt 在内存中的存活时间，超时后不再参与前缀匹配
+            </p>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="flex items-center gap-3">
+              <input
+                type="number"
+                min="60"
+                max="86400"
+                step="60"
+                value={ttl}
+                onChange={(e) => { setTtl(parseInt(e.target.value) || 3600); setDirty(true) }}
+                className="flex-1 h-10 rounded-md border border-input bg-background px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+              />
+              <span className="text-sm text-muted-foreground whitespace-nowrap">秒</span>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              = {ttl >= 3600 ? `${Math.floor(ttl / 3600)} 小时 ${Math.round((ttl % 3600) / 60)} 分钟` : `${Math.round(ttl / 60)} 分钟`}
+            </p>
+          </CardContent>
+        </Card>
+      </div>
     </div>
   )
 }

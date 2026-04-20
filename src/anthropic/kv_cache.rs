@@ -87,19 +87,23 @@ struct KvInMemoryState {
 
 static KV_STATE: OnceLock<Mutex<KvInMemoryState>> = OnceLock::new();
 static KV_RECORDS_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-static KV_CONFIG: OnceLock<(f64, i64)> = OnceLock::new();
+static KV_CONFIG: OnceLock<Mutex<(f64, i64)>> = OnceLock::new();
 
-/// 设置 KV cache 的运行时配置（应在启动时调用一次）
+/// 设置 KV cache 的运行时配置（可多次调用，后续调用会更新值）
 pub fn set_kv_cache_config(cache_read_efficiency: f64, kv_cache_ttl_secs: i64) {
-    let _ = KV_CONFIG.set((cache_read_efficiency.clamp(0.0, 1.0), kv_cache_ttl_secs.max(60)));
+    let val = (cache_read_efficiency.clamp(0.0, 1.0), kv_cache_ttl_secs.max(60));
+    match KV_CONFIG.get() {
+        Some(lock) => *lock.lock() = val,
+        None => { let _ = KV_CONFIG.set(Mutex::new(val)); }
+    }
 }
 
 fn get_cache_read_efficiency() -> f64 {
-    KV_CONFIG.get().map(|(e, _)| *e).unwrap_or(0.87)
+    KV_CONFIG.get().map(|l| l.lock().0).unwrap_or(0.87)
 }
 
 fn get_kv_cache_ttl_secs() -> i64 {
-    KV_CONFIG.get().map(|(_, t)| *t).unwrap_or(3600)
+    KV_CONFIG.get().map(|l| l.lock().1).unwrap_or(3600)
 }
 
 #[derive(Debug, Clone, Serialize)]
