@@ -346,10 +346,10 @@ impl AdminService {
 
     /// 获取 KV 缓存配置
     pub fn get_kv_cache_config(&self) -> KvCacheConfigResponse {
-        let config = self.token_manager.config();
+        use crate::anthropic::kv_cache::{get_cache_read_efficiency, get_kv_cache_ttl_secs};
         KvCacheConfigResponse {
-            cache_read_efficiency: config.cache_read_efficiency,
-            kv_cache_ttl_secs: config.kv_cache_ttl_secs,
+            cache_read_efficiency: get_cache_read_efficiency(),
+            kv_cache_ttl_secs: get_kv_cache_ttl_secs(),
         }
     }
 

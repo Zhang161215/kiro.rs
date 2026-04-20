@@ -98,11 +98,11 @@ pub fn set_kv_cache_config(cache_read_efficiency: f64, kv_cache_ttl_secs: i64) {
     }
 }
 
-fn get_cache_read_efficiency() -> f64 {
+pub fn get_cache_read_efficiency() -> f64 {
     KV_CONFIG.get().map(|l| l.lock().0).unwrap_or(0.87)
 }
 
-fn get_kv_cache_ttl_secs() -> i64 {
+pub fn get_kv_cache_ttl_secs() -> i64 {
     KV_CONFIG.get().map(|l| l.lock().1).unwrap_or(3600)
 }
 
