@@ -5,7 +5,7 @@ Cargo.lock
 # Node.js dependencies and build artifacts
 admin-ui/node_modules/
 admin-ui/dist/
-admin-ui/pnpm-lock.yaml
+# NOTE: admin-ui/pnpm-lock.yaml must NOT be ignored — Dockerfile COPY 需要它做 --frozen-lockfile 构建
 admin-ui/tsconfig.tsbuildinfo
 admin-ui/.vite/
 

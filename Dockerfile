@@ -2,7 +2,9 @@ FROM node:22-alpine AS frontend-builder
 
 WORKDIR /app/admin-ui
 COPY admin-ui/package.json admin-ui/pnpm-lock.yaml ./
-RUN npm install -g pnpm && pnpm install --frozen-lockfile
+# 钉 pnpm@10：pnpm 11 不再读 package.json 的 pnpm.onlyBuiltDependencies，
+# 会触发 ERR_PNPM_IGNORED_BUILDS 导致 @swc/core、esbuild 构建被忽略而失败
+RUN npm install -g pnpm@10 && pnpm install --frozen-lockfile
 COPY admin-ui ./
 RUN pnpm build
 
