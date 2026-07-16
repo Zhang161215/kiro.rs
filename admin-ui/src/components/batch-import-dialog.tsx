@@ -20,6 +20,7 @@ interface BatchImportDialogProps {
 
 interface CredentialInput {
   refreshToken: string
+  authMethod?: string
   clientId?: string
   clientSecret?: string
   region?: string
@@ -28,17 +29,51 @@ interface CredentialInput {
   priority?: number
   machineId?: string
   email?: string
+  // 企业 SSO (external_idp)
+  provider?: string
+  tokenEndpoint?: string
+  issuerUrl?: string
+  scopes?: string[]
+  profileArn?: string
 }
 
-interface VerificationResult {
-  index: number
-  status: 'pending' | 'checking' | 'verifying' | 'verified' | 'duplicate' | 'failed'
-  error?: string
-  usage?: string
-  email?: string
-  credentialId?: number
-  rollbackStatus?: 'success' | 'failed' | 'skipped'
-  rollbackError?: string
+// scopes 兼容 string(空格/逗号分隔) 或 string[]
+function normalizeScopes(v: unknown): string[] | undefined {
+  if (Array.isArray(v)) {
+    const arr = v.filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
+    return arr.length > 0 ? arr : undefined
+  }
+  if (typeof v === 'string') {
+    const arr = v.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean)
+    return arr.length > 0 ? arr : undefined
+  }
+  return undefined
+}
+
+const str = (v: unknown): string | undefined =>
+  typeof v === 'string' && v.trim() ? v.trim() : undefined
+
+// 从一个对象提取凭据字段（兼容 Kiro 原生 kiro-auth-token.json 格式）
+function extractCred(obj: Record<string, unknown>): CredentialInput | null {
+  const refreshToken = str(obj.refreshToken)
+  if (!refreshToken) return null
+  return {
+    refreshToken,
+    authMethod: str(obj.authMethod),
+    clientId: str(obj.clientId),
+    clientSecret: str(obj.clientSecret),
+    region: str(obj.region),
+    authRegion: str(obj.authRegion),
+    apiRegion: str(obj.apiRegion),
+    machineId: str(obj.machineId),
+    email: str(obj.email),
+    priority: typeof obj.priority === 'number' ? obj.priority : undefined,
+    provider: str(obj.provider),
+    tokenEndpoint: str(obj.tokenEndpoint),
+    issuerUrl: str(obj.issuerUrl),
+    scopes: normalizeScopes(obj.scopes),
+    profileArn: str(obj.profileArn),
+  }
 }
 
 // 从任意 JSON 中提取凭据列表，兼容多种格式
@@ -51,36 +86,37 @@ function parseCredentials(raw: string): CredentialInput[] {
     if (typeof item !== 'object' || item === null) continue
     const obj = item as Record<string, unknown>
 
-    // KAM 新版平铺格式: refreshToken 在顶层
-    if (typeof obj.refreshToken === 'string' && obj.refreshToken.trim()) {
-      results.push({
-        refreshToken: (obj.refreshToken as string).trim(),
-        clientId: typeof obj.clientId === 'string' ? obj.clientId : undefined,
-        clientSecret: typeof obj.clientSecret === 'string' ? obj.clientSecret : undefined,
-        region: typeof obj.region === 'string' ? obj.region : undefined,
-        authRegion: typeof obj.authRegion === 'string' ? obj.authRegion : undefined,
-        apiRegion: typeof obj.apiRegion === 'string' ? obj.apiRegion : undefined,
-        machineId: typeof obj.machineId === 'string' ? obj.machineId : undefined,
-        email: typeof obj.email === 'string' ? obj.email : undefined,
-        priority: typeof obj.priority === 'number' ? obj.priority : undefined,
-      })
+    // 顶层平铺格式（KAM 新版 / Kiro 原生 kiro-auth-token.json / 标准数组）
+    const top = extractCred(obj)
+    if (top) {
+      results.push(top)
       continue
     }
 
-    // KAM 旧版嵌套格式: credentials.refreshToken
+    // 嵌套格式: credentials.refreshToken（KAM 旧版）
     const cred = obj.credentials as Record<string, unknown> | undefined
-    if (cred && typeof cred.refreshToken === 'string' && cred.refreshToken.trim()) {
-      results.push({
-        refreshToken: (cred.refreshToken as string).trim(),
-        clientId: typeof cred.clientId === 'string' ? cred.clientId : undefined,
-        clientSecret: typeof cred.clientSecret === 'string' ? cred.clientSecret : undefined,
-        region: typeof cred.region === 'string' ? cred.region : undefined,
-        machineId: typeof obj.machineId === 'string' ? (obj.machineId as string) : undefined,
-        email: typeof obj.email === 'string' ? (obj.email as string) : undefined,
-      })
+    if (cred && typeof cred === 'object') {
+      const nested = extractCred(cred)
+      if (nested) {
+        // 顶层的 machineId/email 作为补充
+        nested.machineId = nested.machineId ?? str(obj.machineId)
+        nested.email = nested.email ?? str(obj.email)
+        results.push(nested)
+      }
     }
   }
   return results
+}
+
+interface VerificationResult {
+  index: number
+  status: 'pending' | 'checking' | 'verifying' | 'verified' | 'duplicate' | 'failed'
+  error?: string
+  usage?: string
+  email?: string
+  credentialId?: number
+  rollbackStatus?: 'success' | 'failed' | 'skipped'
+  rollbackError?: string
 }
 
 export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps) {
@@ -188,16 +224,26 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
         try {
           const clientId = cred.clientId?.trim() || undefined
           const clientSecret = cred.clientSecret?.trim() || undefined
-          const authMethod = clientId && clientSecret ? 'idc' : 'social'
+          // 优先使用原生 authMethod（含 external_idp）；缺省再按 clientSecret 推断
+          const authMethod =
+            cred.authMethod?.trim() ||
+            (clientId && clientSecret ? 'idc' : 'social')
 
           const addedCred = await addCredential({
-            refreshToken: token, authMethod,
+            refreshToken: token,
+            authMethod: authMethod as 'social' | 'idc' | 'external_idp',
             authRegion: cred.authRegion?.trim() || cred.region?.trim() || undefined,
             apiRegion: cred.apiRegion?.trim() || undefined,
             clientId, clientSecret,
             priority: cred.priority || 0,
             machineId: cred.machineId?.trim() || undefined,
             email: cred.email?.trim() || undefined,
+            // 企业 SSO (external_idp) 字段
+            provider: cred.provider,
+            tokenEndpoint: cred.tokenEndpoint,
+            issuerUrl: cred.issuerUrl,
+            scopes: cred.scopes,
+            profileArn: cred.profileArn,
           })
           addedCredId = addedCred.credentialId
           await new Promise(resolve => setTimeout(resolve, 1000))
@@ -278,13 +324,13 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
               </div>
             )}
             <textarea
-              placeholder={'粘贴 JSON 或点击「选择文件导入」加载 .json 文件\n支持 KAM 导出格式、单对象、数组等多种格式'}
+              placeholder={'粘贴 JSON 或点击「选择文件导入」加载 .json 文件\n支持 Kiro 原生 kiro-auth-token.json（含企业 SSO）、KAM 导出、单对象、数组等格式'}
               value={jsonInput}
               onChange={(e) => { setJsonInput(e.target.value); setLoadedFiles([]) }}
               disabled={importing}
               className="flex min-h-[200px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 font-mono"
             />
-            <p className="text-xs text-muted-foreground">支持多文件选择，自动合并。兼容 KAM 导出格式、标准凭据数组等</p>
+            <p className="text-xs text-muted-foreground">支持多文件选择，自动合并。兼容 Kiro 原生 kiro-auth-token.json（含 external_idp 企业 SSO）、KAM 导出、标准凭据数组等</p>
           </div>
 
           {(importing || results.length > 0) && (
