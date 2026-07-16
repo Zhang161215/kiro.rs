@@ -5,6 +5,7 @@ mod common;
 mod http_client;
 mod kiro;
 mod model;
+mod openai;
 pub mod token;
 
 use std::collections::HashMap;
@@ -161,6 +162,9 @@ async fn main() {
     anthropic::kv_cache::set_kv_cache_config(config.cache_read_efficiency, config.kv_cache_ttl_secs);
     // 初始化全局模型注册表（供 /v1/models 与映射查询使用，admin 后台可热更新）
     anthropic::model_registry::set_models(config.models.clone());
+    // KV 缓存/请求明细目录：与 admin 读取同源（凭据文件所在目录），
+    // 避免写入落到进程 cwd 而 admin 从凭据目录读取导致概览数据为空。
+    anthropic::kv_cache::set_records_dir(token_manager.cache_dir());
     let anthropic_app = anthropic::create_router_with_provider(
         &api_key,
         Some(kiro_provider),

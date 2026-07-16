@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { RefreshCw, LogOut, Moon, Sun, Server, Plus, Upload, FileUp, Trash2, RotateCcw, CheckCircle2, LayoutList, Database } from 'lucide-react'
+import { RefreshCw, Plus, Upload, FileUp, Trash2, RotateCcw, CheckCircle2, LayoutList, Database } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { storage } from '@/lib/storage'
@@ -43,12 +43,6 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const cancelVerifyRef = useRef(false)
   const [currentPage, setCurrentPage] = useState(1)
   const itemsPerPage = 12
-  const [darkMode, setDarkMode] = useState(() => {
-    if (typeof window !== 'undefined') {
-      return document.documentElement.classList.contains('dark')
-    }
-    return false
-  })
 
   const queryClient = useQueryClient()
   const { data, isLoading, error, refetch } = useCredentials()
@@ -106,11 +100,6 @@ export function Dashboard({ onLogout }: DashboardProps) {
       return next.size === prev.size ? prev : next
     })
   }, [data?.credentials])
-
-  const toggleDarkMode = () => {
-    setDarkMode(!darkMode)
-    document.documentElement.classList.toggle('dark')
-  }
 
   const handleViewBalance = (id: number) => {
     setSelectedCredentialId(id)
@@ -538,64 +527,60 @@ export function Dashboard({ onLogout }: DashboardProps) {
   }
 
   return (
-    <div className="min-h-screen bg-background">
-      {/* 顶部导航 */}
-      <header className="sticky top-0 z-50 w-full border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-        <div className="container flex h-14 items-center justify-between px-4 md:px-8">
-          <div className="flex items-center gap-2">
-            <Server className="h-5 w-5" />
-            <span className="font-semibold">Kiro Admin</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleToggleLoadBalancing}
-              disabled={isLoadingMode || isSettingMode}
-              title="切换负载均衡模式"
-            >
-              {isLoadingMode ? '加载中...' : (loadBalancingData?.mode === 'priority' ? '优先级模式' : '均衡负载')}
-            </Button>
-            <Button variant="ghost" size="icon" onClick={toggleDarkMode}>
-              {darkMode ? <Sun className="h-5 w-5" /> : <Moon className="h-5 w-5" />}
-            </Button>
-            <Button variant="ghost" size="icon" onClick={handleRefresh}>
-              <RefreshCw className="h-5 w-5" />
-            </Button>
-            <Button variant="ghost" size="icon" onClick={handleLogout}>
-              <LogOut className="h-5 w-5" />
-            </Button>
-          </div>
-        </div>
-      </header>
-
-      {/* 主内容 */}
-      <main className="container mx-auto px-4 md:px-8 py-6">
-        {/* Tab 导航 */}
-        <div className="flex items-center gap-1 mb-6 border-b">
+    <div className="animate-fade-in">
+      {/* 子 Tab + 工具栏 */}
+      <div className="mb-6 flex items-end justify-between gap-3 flex-wrap">
+        <div className="inline-flex items-center gap-1 rounded-full border border-border/60 p-0.5">
           <button
-            className={`flex items-center gap-1.5 px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+            className={`inline-flex items-center gap-1.5 px-3 h-7 text-xs font-medium rounded-full transition-colors ${
               activeTab === 'credentials'
-                ? 'border-primary text-primary'
-                : 'border-transparent text-muted-foreground hover:text-foreground'
+                ? 'bg-primary text-primary-foreground'
+                : 'text-muted-foreground hover:text-foreground'
             }`}
             onClick={() => setActiveTab('credentials')}
           >
-            <LayoutList className="h-4 w-4" />
+            <LayoutList className="h-3.5 w-3.5" />
             凭据管理
           </button>
           <button
-            className={`flex items-center gap-1.5 px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+            className={`inline-flex items-center gap-1.5 px-3 h-7 text-xs font-medium rounded-full transition-colors ${
               activeTab === 'details'
-                ? 'border-primary text-primary'
-                : 'border-transparent text-muted-foreground hover:text-foreground'
+                ? 'bg-primary text-primary-foreground'
+                : 'text-muted-foreground hover:text-foreground'
             }`}
             onClick={() => setActiveTab('details')}
           >
-            <Database className="h-4 w-4" />
+            <Database className="h-3.5 w-3.5" />
             请求记录
           </button>
         </div>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 rounded-full"
+            onClick={handleToggleLoadBalancing}
+            disabled={isLoadingMode || isSettingMode}
+            title="切换负载均衡模式"
+          >
+            {isLoadingMode
+              ? '加载中…'
+              : loadBalancingData?.mode === 'priority'
+                ? '优先级模式'
+                : '均衡负载'}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 rounded-full"
+            onClick={handleRefresh}
+            title="刷新数据"
+          >
+            <RefreshCw className="h-3.5 w-3.5 mr-1" />
+            刷新
+          </Button>
+        </div>
+      </div>
 
         {activeTab === 'credentials' ? (
           <>
@@ -779,7 +764,6 @@ export function Dashboard({ onLogout }: DashboardProps) {
         ) : activeTab === 'details' ? (
           <RequestDetailsPanel />
         ) : null}
-      </main>
 
       {/* 余额对话框 */}
       <BalanceDialog

@@ -76,6 +76,17 @@ Never suggest bypassing these limits via alternative tools. \
 Never ask the user whether to switch approaches. \
 Complete all chunked operations without commentary.";
 
+/// GPT（OpenAI）模型的占位上游 model id。
+///
+/// Kiro 于 GPT-5.6 引入 OpenAI 模型，档位为 Sol / Terra / Luna，均为 272K 上下文。
+/// 官方未公开裸 model id，需从 Kiro 账号/抓包确认真实上游 `modelId` 后替换此常量；
+/// 亦可在 config.json 的 `models` 段（或 admin 后台「模型配置」）配置 `kiro_model_id` 覆盖。
+// TODO(GPT): 待主人提供真实上游 modelId 后替换下面三个常量。
+const GPT_PLACEHOLDER_MODEL_ID: &str = "gpt-5.6";
+const GPT_SOL_MODEL_ID: &str = "gpt-5.6"; // 旗舰档 Sol
+const GPT_TERRA_MODEL_ID: &str = "gpt-5.6"; // 均衡档 Terra
+const GPT_LUNA_MODEL_ID: &str = "gpt-5.6"; // 高效档 Luna
+
 /// 模型映射：将 Anthropic 模型名映射到 Kiro 模型 ID
 ///
 /// 按照用户要求：
@@ -85,6 +96,7 @@ Complete all chunked operations without commentary.";
 /// - opus 4.5/4-5 → claude-opus-4.5
 /// - 其他 opus → claude-opus-4.6
 /// - 所有 haiku → claude-haiku-4.5
+/// - gpt / sol / terra / luna → GPT 占位 id（可经 config.models 覆盖）
 pub fn map_model(model: &str) -> Option<String> {
     let model_lower = model.to_lowercase();
 
@@ -104,9 +116,23 @@ pub fn map_model(model: &str) -> Option<String> {
         }
     } else if model_lower.contains("haiku") {
         Some("claude-haiku-4.5".to_string())
+    } else if model_lower.contains("gpt") || model_lower.contains("openai") {
+        Some(GPT_PLACEHOLDER_MODEL_ID.to_string())
+    } else if model_lower.contains("sol") {
+        Some(GPT_SOL_MODEL_ID.to_string())
+    } else if model_lower.contains("terra") {
+        Some(GPT_TERRA_MODEL_ID.to_string())
+    } else if model_lower.contains("luna") {
+        Some(GPT_LUNA_MODEL_ID.to_string())
     } else {
         None
     }
+}
+
+/// 判断模型是否为 GPT（OpenAI）系
+pub fn is_gpt_model(model: &str) -> bool {
+    let m = model.to_lowercase();
+    m.contains("gpt") || m.contains("openai") || m.contains("sol") || m.contains("terra") || m.contains("luna")
 }
 
 /// 模型映射（配置优先版本）
@@ -126,6 +152,10 @@ pub fn map_model_with_config(model: &str, models: &[ModelEntry]) -> Option<Strin
 /// 复用 `map_model` 的映射逻辑，确保窗口大小判断与模型映射一致。
 /// Kiro 于 2026-03-24 将 Opus 4.6 和 Sonnet 4.6 升级至 1M 上下文。
 pub fn get_context_window_size(model: &str) -> i32 {
+    // GPT-5.6（Sol/Terra/Luna）均为 272K 上下文
+    if is_gpt_model(model) {
+        return 272_000;
+    }
     match map_model(model) {
         Some(mapped) if mapped == "claude-sonnet-4.6" || mapped == "claude-opus-4.6" || mapped == "claude-opus-4.7" => 1_000_000,
         _ => 200_000,
@@ -1035,7 +1065,18 @@ mod tests {
 
     #[test]
     fn test_map_model_unsupported() {
-        assert!(map_model("gpt-4").is_none());
+        // 完全未知的模型仍返回 None（gpt 已作为受支持模型）
+        assert!(map_model("mistral-large").is_none());
+        assert!(map_model("gemini-2.5-pro").is_none());
+    }
+
+    #[test]
+    fn test_map_model_gpt() {
+        // GPT / OpenAI 及档位代号映射到 GPT 占位 id
+        assert!(map_model("gpt-5.6").is_some());
+        assert!(map_model("gpt-4").is_some());
+        assert!(map_model("openai/gpt").is_some());
+        assert_eq!(get_context_window_size("gpt-5.6"), 272_000);
     }
 
     #[test]

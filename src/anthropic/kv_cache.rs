@@ -88,6 +88,30 @@ struct KvInMemoryState {
 static KV_STATE: OnceLock<Mutex<KvInMemoryState>> = OnceLock::new();
 static KV_RECORDS_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static KV_CONFIG: OnceLock<Mutex<(f64, i64)>> = OnceLock::new();
+/// 全局 KV 记录/统计文件目录（与 admin 读取同源）。
+/// 未设置时回退到进程当前工作目录。在 main 启动时由 `set_records_dir` 设置，
+/// 用于修复「写入落到 cwd、admin 从凭据目录读取」导致概览数据为空的问题。
+static KV_RECORDS_DIR: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+
+/// 设置全局 KV 记录目录（可多次调用）
+pub fn set_records_dir(dir: Option<PathBuf>) {
+    match KV_RECORDS_DIR.get() {
+        Some(lock) => *lock.lock() = dir,
+        None => {
+            let _ = KV_RECORDS_DIR.set(Mutex::new(dir));
+        }
+    }
+}
+
+/// 读取全局 KV 记录目录（若已设置）
+fn global_records_dir() -> Option<PathBuf> {
+    KV_RECORDS_DIR.get().and_then(|l| l.lock().clone())
+}
+
+/// 对外暴露全局记录目录（供 failure_prompt_log 等模块对齐同一目录）
+pub fn records_dir() -> Option<PathBuf> {
+    global_records_dir()
+}
 
 /// 设置 KV cache 的运行时配置（可多次调用，后续调用会更新值）
 pub fn set_kv_cache_config(cache_read_efficiency: f64, kv_cache_ttl_secs: i64) {
@@ -125,7 +149,10 @@ struct KvCacheRecord {
 }
 
 fn resolve_cache_dir(dir_hint: Option<PathBuf>) -> PathBuf {
-    dir_hint.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    // 优先级：显式 dir_hint > 全局记录目录（凭据目录）> 进程当前工作目录
+    dir_hint
+        .or_else(global_records_dir)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
 fn records_file_path(dir_hint: Option<PathBuf>) -> PathBuf {

@@ -318,19 +318,19 @@ export function CredentialCard({
                 size="sm"
                 variant="default"
                 onClick={() => onViewBalance(credential.id)}
-                className="w-full"
+                className="w-full min-w-0 px-2"
               >
-                <Wallet className="h-4 w-4 mr-1" />
-                查看余额
+                <Wallet className="h-4 w-4" />
+                <span className="truncate">查看余额</span>
               </Button>
               <Button
                 size="sm"
                 variant="outline"
                 onClick={() => setShowEditDialog(true)}
-                className="w-full"
+                className="w-full min-w-0 px-2"
               >
-                <Pencil className="h-4 w-4 mr-1" />
-                编辑
+                <Pencil className="h-4 w-4" />
+                <span className="truncate">编辑</span>
               </Button>
               {(() => {
                 const overageEnabled = balance?.overageStatus === 'ENABLED'
@@ -349,14 +349,14 @@ export function CredentialCard({
                     }}
                     disabled={setOverage.isPending || !balance}
                     title={!balance ? '请先查看余额获取超额状态' : overageEnabled ? '关闭超额计费' : '开启超额计费'}
-                    className="w-full"
+                    className="w-full min-w-0 px-2"
                   >
                     {overageEnabled ? (
-                      <ZapOff className="h-4 w-4 mr-1" />
+                      <ZapOff className="h-4 w-4" />
                     ) : (
-                      <Zap className="h-4 w-4 mr-1" />
+                      <Zap className="h-4 w-4" />
                     )}
-                    {overageEnabled ? '关闭超额' : '开启超额'}
+                    <span className="truncate">{overageEnabled ? '关超额' : '开超额'}</span>
                   </Button>
                 )
               })()}
@@ -366,10 +366,10 @@ export function CredentialCard({
                 onClick={handleForceRefresh}
                 disabled={forceRefresh.isPending || credential.disabled}
                 title={credential.disabled ? '已禁用的凭据无法刷新 Token' : '强制刷新 Token'}
-                className="w-full"
+                className="w-full min-w-0 px-2"
               >
-                <RefreshCw className={`h-4 w-4 mr-1 ${forceRefresh.isPending ? 'animate-spin' : ''}`} />
-                刷新 Token
+                <RefreshCw className={`h-4 w-4 ${forceRefresh.isPending ? 'animate-spin' : ''}`} />
+                <span className="truncate">刷新 Token</span>
               </Button>
             </div>
 
@@ -389,10 +389,10 @@ export function CredentialCard({
                   )
                 }}
                 disabled={setPriority.isPending || credential.priority === 0}
-                className="w-full"
+                className="w-full min-w-0 px-2"
               >
-                <ChevronUp className="h-4 w-4 mr-1" />
-                提高优先级
+                <ChevronUp className="h-4 w-4" />
+                <span className="truncate">提高优先级</span>
               </Button>
               <Button
                 size="sm"
@@ -408,20 +408,20 @@ export function CredentialCard({
                   )
                 }}
                 disabled={setPriority.isPending}
-                className="w-full"
+                className="w-full min-w-0 px-2"
               >
-                <ChevronDown className="h-4 w-4 mr-1" />
-                降低优先级
+                <ChevronDown className="h-4 w-4" />
+                <span className="truncate">降低优先级</span>
               </Button>
               <Button
                 size="sm"
                 variant="ghost"
                 onClick={handleReset}
                 disabled={resetFailure.isPending || (credential.failureCount === 0 && credential.refreshFailureCount === 0)}
-                className="w-full"
+                className="w-full min-w-0 px-2"
               >
-                <RefreshCw className="h-4 w-4 mr-1" />
-                重置失败
+                <RefreshCw className="h-4 w-4" />
+                <span className="truncate">重置失败</span>
               </Button>
             </div>
 
@@ -434,8 +434,8 @@ export function CredentialCard({
                 disabled={!credential.disabled}
                 title={!credential.disabled ? '需要先禁用凭据才能删除' : undefined}
               >
-                <Trash2 className="h-4 w-4 mr-1" />
-                删除凭据
+                <Trash2 className="h-4 w-4" />
+                <span>删除凭据</span>
               </Button>
             </div>
           </div>

@@ -95,7 +95,7 @@ export interface SetPriorityRequest {
 // 添加凭据请求
 export interface AddCredentialRequest {
   refreshToken: string
-  authMethod?: 'social' | 'idc'
+  authMethod?: 'social' | 'idc' | 'external_idp'
   clientId?: string
   clientSecret?: string
   priority?: number
@@ -106,6 +106,12 @@ export interface AddCredentialRequest {
   proxyUrl?: string
   proxyUsername?: string
   proxyPassword?: string
+  // 企业 SSO (external_idp)
+  provider?: string
+  tokenEndpoint?: string
+  issuerUrl?: string
+  scopes?: string[]
+  profileArn?: string
 }
 
 // 添加凭据响应

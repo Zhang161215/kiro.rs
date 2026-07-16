@@ -475,6 +475,43 @@ pub async fn get_models(State(_state): State<AppState>) -> impl IntoResponse {
             model_type: "chat".to_string(),
             max_tokens: 64000,
         },
+        // OpenAI GPT（Kiro 上游 GPT-5.6，档位 Sol/Terra/Luna，272K 上下文）
+        Model {
+            id: "gpt-5.6".to_string(),
+            object: "model".to_string(),
+            created: 1775000000,
+            owned_by: "openai".to_string(),
+            display_name: "GPT-5.6".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 64000,
+        },
+        Model {
+            id: "gpt-5.6-sol".to_string(),
+            object: "model".to_string(),
+            created: 1775000000,
+            owned_by: "openai".to_string(),
+            display_name: "GPT-5.6 Sol (旗舰)".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 64000,
+        },
+        Model {
+            id: "gpt-5.6-terra".to_string(),
+            object: "model".to_string(),
+            created: 1775000000,
+            owned_by: "openai".to_string(),
+            display_name: "GPT-5.6 Terra (均衡)".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 64000,
+        },
+        Model {
+            id: "gpt-5.6-luna".to_string(),
+            object: "model".to_string(),
+            created: 1775000000,
+            owned_by: "openai".to_string(),
+            display_name: "GPT-5.6 Luna (高效)".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 64000,
+        },
     ];
 
     // 追加全局注册表中配置的额外模型（admin 后台热更新的来源）

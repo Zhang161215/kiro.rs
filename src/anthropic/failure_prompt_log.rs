@@ -41,7 +41,10 @@ struct PromptDetails {
 }
 
 fn resolve_cache_dir(dir_hint: Option<PathBuf>) -> PathBuf {
-    dir_hint.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    // 与 kv_cache 保持一致：显式 hint > 全局记录目录（凭据目录）> 进程 cwd
+    dir_hint
+        .or_else(|| super::kv_cache::records_dir())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
 fn records_file_path(dir_hint: Option<PathBuf>) -> PathBuf {

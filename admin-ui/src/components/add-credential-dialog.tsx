@@ -17,7 +17,7 @@ interface AddCredentialDialogProps {
   onOpenChange: (open: boolean) => void
 }
 
-type AuthMethod = 'social' | 'idc'
+type AuthMethod = 'social' | 'idc' | 'external_idp'
 
 export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogProps) {
   const [refreshToken, setRefreshToken] = useState('')
@@ -31,6 +31,11 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
   const [proxyUrl, setProxyUrl] = useState('')
   const [proxyUsername, setProxyUsername] = useState('')
   const [proxyPassword, setProxyPassword] = useState('')
+  // 企业 SSO (external_idp) 字段
+  const [provider, setProvider] = useState('AzureAD')
+  const [tokenEndpoint, setTokenEndpoint] = useState('')
+  const [scopes, setScopes] = useState('openid profile offline_access')
+  const [profileArn, setProfileArn] = useState('')
 
   const { mutate, isPending } = useAddCredential()
 
@@ -46,6 +51,10 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
     setProxyUrl('')
     setProxyUsername('')
     setProxyPassword('')
+    setProvider('AzureAD')
+    setTokenEndpoint('')
+    setScopes('openid profile offline_access')
+    setProfileArn('')
   }
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -63,6 +72,17 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
       return
     }
 
+    // 企业 SSO 需要 Client ID 和 Token Endpoint
+    if (authMethod === 'external_idp' && (!clientId.trim() || !tokenEndpoint.trim())) {
+      toast.error('企业 SSO 认证需要填写 Client ID 和 Token Endpoint')
+      return
+    }
+
+    const scopesList =
+      authMethod === 'external_idp'
+        ? scopes.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean)
+        : undefined
+
     mutate(
       {
         refreshToken: refreshToken.trim(),
@@ -76,6 +96,14 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
         proxyUrl: proxyUrl.trim() || undefined,
         proxyUsername: proxyUsername.trim() || undefined,
         proxyPassword: proxyPassword.trim() || undefined,
+        ...(authMethod === 'external_idp'
+          ? {
+              provider: provider.trim() || undefined,
+              tokenEndpoint: tokenEndpoint.trim() || undefined,
+              scopes: scopesList && scopesList.length > 0 ? scopesList : undefined,
+              profileArn: profileArn.trim() || undefined,
+            }
+          : {}),
       },
       {
         onSuccess: (data) => {
@@ -128,6 +156,7 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
               >
                 <option value="social">Social</option>
                 <option value="idc">IdC/Builder-ID/IAM</option>
+                <option value="external_idp">企业 SSO (Entra ID / Azure AD)</option>
               </select>
             </div>
 
@@ -186,6 +215,78 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
                     onChange={(e) => setClientSecret(e.target.value)}
                     disabled={isPending}
                   />
+                </div>
+              </>
+            )}
+
+            {/* 企业 SSO (external_idp) 额外字段 */}
+            {authMethod === 'external_idp' && (
+              <>
+                <div className="space-y-2">
+                  <label htmlFor="provider" className="text-sm font-medium">
+                    Provider
+                  </label>
+                  <Input
+                    id="provider"
+                    placeholder="AzureAD"
+                    value={provider}
+                    onChange={(e) => setProvider(e.target.value)}
+                    disabled={isPending}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label htmlFor="ssoClientId" className="text-sm font-medium">
+                    Client ID <span className="text-red-500">*</span>
+                  </label>
+                  <Input
+                    id="ssoClientId"
+                    placeholder="公共客户端 ID（无需 Client Secret）"
+                    value={clientId}
+                    onChange={(e) => setClientId(e.target.value)}
+                    disabled={isPending}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label htmlFor="tokenEndpoint" className="text-sm font-medium">
+                    Token Endpoint <span className="text-red-500">*</span>
+                  </label>
+                  <Input
+                    id="tokenEndpoint"
+                    placeholder="https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
+                    value={tokenEndpoint}
+                    onChange={(e) => setTokenEndpoint(e.target.value)}
+                    disabled={isPending}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label htmlFor="scopes" className="text-sm font-medium">
+                    Scopes
+                  </label>
+                  <Input
+                    id="scopes"
+                    placeholder="openid profile offline_access"
+                    value={scopes}
+                    onChange={(e) => setScopes(e.target.value)}
+                    disabled={isPending}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    空格或逗号分隔，需包含 offline_access 才能获取 refresh token
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  <label htmlFor="profileArn" className="text-sm font-medium">
+                    Profile ARN
+                  </label>
+                  <Input
+                    id="profileArn"
+                    placeholder="留空则自动懒解析（ListAvailableProfiles）"
+                    value={profileArn}
+                    onChange={(e) => setProfileArn(e.target.value)}
+                    disabled={isPending}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    可选。留空时首次使用会尝试自动解析；解析失败可回此手动填写
+                  </p>
                 </div>
               </>
             )}

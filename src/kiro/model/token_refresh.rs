@@ -44,3 +44,29 @@ pub struct IdcRefreshResponse {
     #[serde(default)]
     pub profile_arn: Option<String>,
 }
+
+/// 外部 IdP Token 刷新请求体 (external_idp，如 Microsoft Entra ID / Azure AD)
+///
+/// 使用 OAuth2 `refresh_token` grant，属于公共客户端（无 client_secret）。
+/// 以 `application/x-www-form-urlencoded` 编码提交。
+#[derive(Debug, Serialize)]
+pub struct ExternalIdpRefreshRequest {
+    pub grant_type: String,
+    pub refresh_token: String,
+    pub client_id: String,
+    /// 空格分隔的 scope 列表（需含 offline_access）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+}
+
+/// 外部 IdP Token 刷新响应体 (external_idp)
+///
+/// 标准 OIDC token 响应；不含 profileArn（由 ListAvailableProfiles 懒解析）。
+#[derive(Debug, Deserialize)]
+pub struct ExternalIdpRefreshResponse {
+    pub access_token: String,
+    #[serde(default)]
+    pub refresh_token: Option<String>,
+    #[serde(default)]
+    pub expires_in: Option<i64>,
+}

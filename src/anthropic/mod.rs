@@ -24,9 +24,9 @@
 
 mod converter;
 mod failure_prompt_log;
-mod handlers;
+pub(crate) mod handlers;
 pub mod kv_cache;
-mod middleware;
+pub(crate) mod middleware;
 pub mod model_registry;
 mod router;
 mod stream;

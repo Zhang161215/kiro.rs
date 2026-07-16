@@ -22,7 +22,8 @@ use crate::http_client::{ProxyConfig, build_client};
 use crate::kiro::machine_id;
 use crate::kiro::model::credentials::KiroCredentials;
 use crate::kiro::model::token_refresh::{
-    IdcRefreshRequest, IdcRefreshResponse, RefreshRequest, RefreshResponse,
+    ExternalIdpRefreshRequest, ExternalIdpRefreshResponse, IdcRefreshRequest, IdcRefreshResponse,
+    RefreshRequest, RefreshResponse,
 };
 use crate::kiro::model::usage_limits::UsageLimitsResponse;
 use crate::model::config::{Config, UpstreamProtectionConfig};
@@ -351,7 +352,9 @@ pub(crate) async fn refresh_token(
         }
     });
 
-    if auth_method.eq_ignore_ascii_case("idc")
+    if credentials.is_external_idp() {
+        refresh_external_idp_token(credentials, config, proxy).await
+    } else if auth_method.eq_ignore_ascii_case("idc")
         || auth_method.eq_ignore_ascii_case("builder-id")
         || auth_method.eq_ignore_ascii_case("iam")
     {
@@ -542,6 +545,87 @@ async fn refresh_idc_token(
     Ok(new_credentials)
 }
 
+/// 刷新外部 IdP Token (external_idp，如 Microsoft Entra ID / Azure AD)
+///
+/// 向凭据自带的 `token_endpoint` 发起 OAuth2 `refresh_token` grant（公共客户端，
+/// 无 client_secret），以 `application/x-www-form-urlencoded` 编码提交。
+/// 响应为标准 OIDC token；profileArn 不在此返回，由 `list_available_profiles` 懒解析。
+async fn refresh_external_idp_token(
+    credentials: &KiroCredentials,
+    config: &Config,
+    proxy: Option<&ProxyConfig>,
+) -> anyhow::Result<KiroCredentials> {
+    tracing::info!("正在刷新 External IdP Token...");
+
+    let refresh_token = credentials.refresh_token.as_ref().unwrap();
+    let token_endpoint = credentials.token_endpoint.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("external_idp 刷新需要 tokenEndpoint（IdP 的 OAuth2 token 端点）")
+    })?;
+    let client_id = credentials
+        .client_id
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("external_idp 刷新需要 clientId（公共客户端 ID）"))?;
+
+    // scope 以空格分隔；确保包含 offline_access 以便拿到新的 refresh token
+    let scope = credentials.scopes.as_ref().map(|s| s.join(" "));
+
+    let client = build_client(proxy, 60, config.tls_backend)?;
+    let body = ExternalIdpRefreshRequest {
+        grant_type: "refresh_token".to_string(),
+        refresh_token: refresh_token.to_string(),
+        client_id: client_id.to_string(),
+        scope,
+    };
+
+    let response = client
+        .post(token_endpoint)
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .header("Connection", "close")
+        .form(&body)
+        .send()
+        .await?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let body_text = response.text().await.unwrap_or_default();
+
+        // 400 + invalid_grant → refreshToken 永久失效
+        if status.as_u16() == 400 && body_text.contains("invalid_grant") {
+            return Err(RefreshTokenInvalidError {
+                message: format!("External IdP refreshToken 已失效 (invalid_grant): {}", body_text),
+            }
+            .into());
+        }
+
+        let error_msg = match status.as_u16() {
+            400 => "external_idp 刷新请求无效（检查 clientId / scope / tokenEndpoint）",
+            401 => "external_idp 凭证已过期或无效，需要重新认证",
+            403 => "权限不足，无法刷新 Token",
+            429 => "请求过于频繁，已被限流",
+            500..=599 => "服务器错误，IdP 服务暂时不可用",
+            _ => "External IdP Token 刷新失败",
+        };
+        bail!("{}: {} {}", error_msg, status, body_text);
+    }
+
+    let data: ExternalIdpRefreshResponse = response.json().await?;
+
+    let mut new_credentials = credentials.clone();
+    new_credentials.access_token = Some(data.access_token);
+
+    if let Some(new_refresh_token) = data.refresh_token {
+        new_credentials.refresh_token = Some(new_refresh_token);
+    }
+
+    if let Some(expires_in) = data.expires_in {
+        let expires_at = Utc::now() + Duration::seconds(expires_in);
+        new_credentials.expires_at = Some(expires_at.to_rfc3339());
+    }
+
+    Ok(new_credentials)
+}
+
 /// 获取使用额度信息
 pub(crate) async fn get_usage_limits(
     credentials: &KiroCredentials,
@@ -594,6 +678,8 @@ pub(crate) async fn get_usage_limits(
 
     if credentials.is_api_key_credential() {
         request = request.header("tokentype", "API_KEY");
+    } else if credentials.is_external_idp() {
+        request = request.header("tokentype", "EXTERNAL_IDP");
     }
 
     let response = request.send().await?;
@@ -613,6 +699,95 @@ pub(crate) async fn get_usage_limits(
 
     let data: UsageLimitsResponse = response.json().await?;
     Ok(data)
+}
+
+/// 懒解析 external_idp 凭据的 profileArn（调 CodeWhisperer ListAvailableProfiles）
+///
+/// external_idp 的 token 刷新不返回 profileArn，需要用 access_token 调用
+/// `listAvailableProfiles` 拉取可用 profile 列表并取第一个的 ARN。
+/// 返回 `Ok(None)` 表示接口成功但无可用 profile；错误交由调用方降级处理。
+pub(crate) async fn list_available_profiles(
+    credentials: &KiroCredentials,
+    config: &Config,
+    token: &str,
+    proxy: Option<&ProxyConfig>,
+) -> anyhow::Result<Option<String>> {
+    tracing::debug!("正在获取可用 Profile 列表 (ListAvailableProfiles)...");
+
+    // 优先级：凭据.api_region > config.api_region > config.region
+    let region = credentials.effective_api_region(config);
+    let host = format!("q.{}.amazonaws.com", region);
+    // 注意：操作名为 PascalCase（ListAvailableProfiles）；小写会返回 UnknownOperationException
+    let url = format!("https://{}/ListAvailableProfiles", host);
+    let machine_id = machine_id::generate_from_credentials(credentials, config);
+    let kiro_version = &config.kiro_version;
+    let os_name = &config.system_version;
+    let node_version = &config.node_version;
+
+    let user_agent = format!(
+        "aws-sdk-js/1.0.0 ua/2.1 os/{} lang/js md/nodejs#{} api/codewhispererruntime#1.0.0 m/N,E KiroIDE-{}-{}",
+        os_name, node_version, kiro_version, machine_id
+    );
+    let amz_user_agent = format!("aws-sdk-js/1.0.0 KiroIDE-{}-{}", kiro_version, machine_id);
+
+    let client = build_client(proxy, 60, config.tls_backend)?;
+
+    let mut request = client
+        .post(&url)
+        .header("content-type", "application/json")
+        .header("x-amz-user-agent", &amz_user_agent)
+        .header("user-agent", &user_agent)
+        .header("host", &host)
+        .header("amz-sdk-invocation-id", uuid::Uuid::new_v4().to_string())
+        .header("amz-sdk-request", "attempt=1; max=1")
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Connection", "close")
+        .body("{}");
+
+    // 数据面 TokenType 标识
+    if credentials.is_external_idp() {
+        request = request.header("tokentype", "EXTERNAL_IDP");
+    } else if credentials.is_api_key_credential() {
+        request = request.header("tokentype", "API_KEY");
+    }
+
+    let response = request.send().await?;
+    let status = response.status();
+    if !status.is_success() {
+        let body_text = response.text().await.unwrap_or_default();
+        bail!("ListAvailableProfiles 失败: {} {}", status, body_text);
+    }
+
+    // 兼容不同字段命名，鲁棒地提取第一个 profile 的 ARN
+    let data: serde_json::Value = response.json().await?;
+
+    // 部分错误会以 HTTP 200 + body 内 __type 返回（如 UnknownOperationException）
+    if data.get("__type").is_some()
+        || data.get("Output").and_then(|o| o.get("__type")).is_some()
+    {
+        bail!("ListAvailableProfiles 返回错误: {}", data);
+    }
+
+    let profiles = data
+        .get("profiles")
+        .or_else(|| data.get("availableProfiles"))
+        .and_then(|v| v.as_array());
+
+    if let Some(profiles) = profiles {
+        for profile in profiles {
+            if let Some(arn) = profile
+                .get("arn")
+                .or_else(|| profile.get("profileArn"))
+                .and_then(|v| v.as_str())
+            {
+                if !arn.is_empty() {
+                    return Ok(Some(arn.to_string()));
+                }
+            }
+        }
+    }
+
+    Ok(None)
 }
 
 // ============================================================================
@@ -2460,6 +2635,43 @@ impl MultiTokenManager {
         validated_cred.proxy_username = new_cred.proxy_username;
         validated_cred.proxy_password = new_cred.proxy_password;
         validated_cred.kiro_api_key = new_cred.kiro_api_key;
+        // external_idp 元数据（refresh 已保留，此处显式确保一致）
+        validated_cred.provider = new_cred.provider;
+        validated_cred.token_endpoint = new_cred.token_endpoint;
+        validated_cred.issuer_url = new_cred.issuer_url;
+        validated_cred.scopes = new_cred.scopes;
+        if validated_cred.profile_arn.is_none() {
+            validated_cred.profile_arn = new_cred.profile_arn;
+        }
+
+        // external_idp：若仍无 profileArn，尝试懒解析（失败不阻断，允许后续手动补填）
+        if validated_cred.is_external_idp() && validated_cred.profile_arn.is_none() {
+            if let Some(token) = validated_cred.access_token.clone() {
+                let effective_proxy = validated_cred.effective_proxy(self.proxy.as_ref());
+                match list_available_profiles(
+                    &validated_cred,
+                    &self.config,
+                    &token,
+                    effective_proxy.as_ref(),
+                )
+                .await
+                {
+                    Ok(Some(arn)) => {
+                        tracing::info!("external_idp 凭据 #{} 已懒解析 profileArn: {}", new_id, arn);
+                        validated_cred.profile_arn = Some(arn);
+                    }
+                    Ok(None) => tracing::warn!(
+                        "external_idp 凭据 #{} 未解析到任何 profile，请手动指定 profileArn",
+                        new_id
+                    ),
+                    Err(e) => tracing::warn!(
+                        "external_idp 凭据 #{} profileArn 懒解析失败（可手动指定）: {}",
+                        new_id,
+                        e
+                    ),
+                }
+            }
+        }
 
         {
             let mut entries = self.entries.lock();

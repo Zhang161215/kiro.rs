@@ -105,6 +105,21 @@ pub struct AddCredentialRequest {
     /// OIDC Client Secret（IdC 认证需要）
     pub client_secret: Option<String>,
 
+    /// 外部 IdP 提供方（external_idp 认证，如 AzureAD）
+    pub provider: Option<String>,
+
+    /// 外部 IdP 的 Token 刷新端点（external_idp 认证必填）
+    pub token_endpoint: Option<String>,
+
+    /// 外部 IdP 的 OIDC issuer（external_idp 认证，可选备注）
+    pub issuer_url: Option<String>,
+
+    /// 外部 IdP 已授权的 scope 列表（external_idp 认证，需含 offline_access）
+    pub scopes: Option<Vec<String>>,
+
+    /// Profile ARN（external_idp 认证可手动指定；不填则懒解析回填）
+    pub profile_arn: Option<String>,
+
     /// 优先级（可选，默认 0）
     #[serde(default)]
     pub priority: u32,

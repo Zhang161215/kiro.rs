@@ -46,6 +46,25 @@ pub struct KiroCredentials {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_secret: Option<String>,
 
+    /// 外部 IdP 提供方标识（external_idp 认证）
+    /// 例如 `AzureAD`（Microsoft Entra ID / Azure AD）。仅作展示与备注用途。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+
+    /// 外部 IdP 的 OAuth2 Token 刷新端点（external_idp 认证必填）
+    /// 例如 `https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_endpoint: Option<String>,
+
+    /// 外部 IdP 的 OIDC issuer（external_idp 认证，备注用途）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issuer_url: Option<String>,
+
+    /// 外部 IdP 已授权的 scope 列表（external_idp 认证）
+    /// 需包含 `offline_access` 才能获取到 refresh token
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scopes: Option<Vec<String>>,
+
     /// 凭据优先级（数字越小优先级越高，默认为 0）
     #[serde(default)]
     #[serde(skip_serializing_if = "is_zero")]
@@ -121,6 +140,14 @@ fn canonicalize_auth_method_value(value: &str) -> &str {
         "idc"
     } else if value.eq_ignore_ascii_case("api_key") || value.eq_ignore_ascii_case("apikey") {
         "api_key"
+    } else if value.eq_ignore_ascii_case("external_idp")
+        || value.eq_ignore_ascii_case("externalidp")
+        || value.eq_ignore_ascii_case("azuread")
+        || value.eq_ignore_ascii_case("azure_ad")
+        || value.eq_ignore_ascii_case("entra")
+        || value.eq_ignore_ascii_case("entra_id")
+    {
+        "external_idp"
     } else {
         value
     }
@@ -272,6 +299,24 @@ impl KiroCredentials {
                 .map(|m| m.eq_ignore_ascii_case("api_key") || m.eq_ignore_ascii_case("apikey"))
                 .unwrap_or(false)
     }
+
+    /// 检查是否为企业外部 IdP 凭据（Microsoft Entra ID / Azure AD 等）
+    ///
+    /// external_idp 凭据走 IdP 自带的 `token_endpoint` 刷新，数据面请求需携带
+    /// `TokenType: EXTERNAL_IDP` 头，profileArn 需懒解析获取。
+    pub fn is_external_idp(&self) -> bool {
+        self.auth_method
+            .as_deref()
+            .map(|m| {
+                m.eq_ignore_ascii_case("external_idp")
+                    || m.eq_ignore_ascii_case("externalidp")
+                    || m.eq_ignore_ascii_case("azuread")
+                    || m.eq_ignore_ascii_case("azure_ad")
+                    || m.eq_ignore_ascii_case("entra")
+                    || m.eq_ignore_ascii_case("entra_id")
+            })
+            .unwrap_or(false)
+    }
 }
 
 #[cfg(test)]
@@ -330,6 +375,10 @@ mod tests {
             auth_method: Some("social".to_string()),
             client_id: None,
             client_secret: None,
+            provider: None,
+            token_endpoint: None,
+            issuer_url: None,
+            scopes: None,
             priority: 0,
             region: None,
             auth_region: None,
@@ -448,6 +497,10 @@ mod tests {
             auth_method: None,
             client_id: None,
             client_secret: None,
+            provider: None,
+            token_endpoint: None,
+            issuer_url: None,
+            scopes: None,
             priority: 0,
             region: Some("eu-west-1".to_string()),
             auth_region: None,
@@ -479,6 +532,10 @@ mod tests {
             auth_method: None,
             client_id: None,
             client_secret: None,
+            provider: None,
+            token_endpoint: None,
+            issuer_url: None,
+            scopes: None,
             priority: 0,
             region: None,
             auth_region: None,
@@ -593,6 +650,10 @@ mod tests {
             auth_method: Some("social".to_string()),
             client_id: None,
             client_secret: None,
+            provider: None,
+            token_endpoint: None,
+            issuer_url: None,
+            scopes: None,
             priority: 3,
             region: Some("us-west-2".to_string()),
             auth_region: None,
