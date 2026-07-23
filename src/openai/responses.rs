@@ -213,6 +213,31 @@ fn flush_pending(messages: &mut Vec<Value>, pending: &mut Vec<Value>) {
     messages.push(json!({ "role": "user", "content": Value::Array(content) }));
 }
 
+/// 追加一个 tool_use 到 assistant 消息；若上一条已是“纯 tool_use”assistant 则合并，
+/// 以保持并行工具调用在同一 turn（符合 Kiro 的 tool_use/tool_result 配对要求）。
+fn push_assistant_tool_use(messages: &mut Vec<Value>, tool_use: Value) {
+    if let Some(last) = messages.last_mut() {
+        let is_assistant = last.get("role").and_then(|v| v.as_str()) == Some("assistant");
+        let all_tool_use = last
+            .get("content")
+            .and_then(|c| c.as_array())
+            .map(|arr| {
+                !arr.is_empty()
+                    && arr
+                        .iter()
+                        .all(|b| b.get("type").and_then(|v| v.as_str()) == Some("tool_use"))
+            })
+            .unwrap_or(false);
+        if is_assistant && all_tool_use {
+            if let Some(arr) = last.get_mut("content").and_then(|c| c.as_array_mut()) {
+                arr.push(tool_use);
+                return;
+            }
+        }
+    }
+    messages.push(json!({ "role": "assistant", "content": [tool_use] }));
+}
+
 fn handle_input_item(
     item: &Value,
     messages: &mut Vec<Value>,
@@ -249,35 +274,56 @@ fn handle_input_item(
             let name = as_str_owned(item.get("name")).unwrap_or_default();
             let args = stringify(item.get("arguments"));
             let input_val: Value = serde_json::from_str(&args).unwrap_or_else(|_| json!({}));
-            let tool_use = json!({
-                "type": "tool_use",
-                "id": call_id,
-                "name": name,
-                "input": input_val,
-            });
-            // 合并连续 function_call 到上一条“纯 tool_use”的 assistant 消息，
-            // 保持并行工具调用在同一 turn，符合 Kiro 的 tool_use/tool_result 配对要求。
-            if let Some(last) = messages.last_mut() {
-                let is_assistant = last.get("role").and_then(|v| v.as_str()) == Some("assistant");
-                let all_tool_use = last
-                    .get("content")
-                    .and_then(|c| c.as_array())
-                    .map(|arr| {
-                        !arr.is_empty()
-                            && arr.iter().all(|b| {
-                                b.get("type").and_then(|v| v.as_str()) == Some("tool_use")
-                            })
-                    })
-                    .unwrap_or(false);
-                if is_assistant && all_tool_use {
-                    if let Some(arr) = last.get_mut("content").and_then(|c| c.as_array_mut()) {
-                        arr.push(tool_use);
-                        return;
-                    }
-                }
-            }
-            messages.push(json!({ "role": "assistant", "content": [tool_use] }));
+            push_assistant_tool_use(
+                messages,
+                json!({
+                    "type": "tool_use",
+                    "id": call_id,
+                    "name": name,
+                    "input": input_val,
+                }),
+            );
         }
+        "custom_tool_call" => {
+            // Codex custom 工具调用（历史回放）：input 是原始文本，包进 {input: ...}
+            flush_pending(messages, pending);
+            let call_id = as_str_owned(item.get("call_id"))
+                .or_else(|| as_str_owned(item.get("id")))
+                .unwrap_or_default();
+            let name = as_str_owned(item.get("name")).unwrap_or_default();
+            let raw_input = stringify(item.get("input"));
+            push_assistant_tool_use(
+                messages,
+                json!({
+                    "type": "tool_use",
+                    "id": call_id,
+                    "name": name,
+                    "input": { "input": raw_input },
+                }),
+            );
+        }
+        "custom_tool_call_output" => {
+            flush_pending(messages, pending);
+            let call_id = as_str_owned(item.get("call_id"))
+                .or_else(|| as_str_owned(item.get("tool_call_id")))
+                .unwrap_or_default();
+            let mut out = stringify(item.get("output"));
+            if out.is_empty() {
+                out = stringify(item.get("content"));
+            }
+            messages.push(json!({
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": call_id,
+                    "content": out,
+                }]
+            }));
+        }
+        // 工具定义注入条目：在 collect_and_convert_tools 中单独提取，这里跳过
+        "additional_tools" => {}
+        // 推理条目（含 encrypted_content）：无法回放，跳过
+        "reasoning" => {}
         "input_text" | "text" => {
             if let Some(t) = item.get("text").and_then(|v| v.as_str()) {
                 if !t.is_empty() {
@@ -397,19 +443,36 @@ fn build_message_from_item(
     }
 }
 
-/// Responses tools（扁平格式）→ Anthropic tools
+/// 收集并转换 tools → (Anthropic tools, custom 工具名集合)
 ///
-/// Responses API：`{ type:"function", name, description, parameters }`（顶层扁平）；
-/// 兼容部分客户端仍用 Chat Completions 的嵌套 `{ type:"function", function:{...} }`。
-/// 非 function 类型（web_search 等）暂跳过。
-fn convert_responses_tools(tools: &Option<Vec<Value>>) -> Option<Value> {
-    let tools = tools.as_ref()?;
-    let mut out: Vec<Value> = Vec::new();
-    for t in tools {
-        let ttype = t.get("type").and_then(|v| v.as_str()).unwrap_or("function");
-        if ttype != "function" {
-            continue;
+/// tools 来源有两处：
+/// 1. 顶层 `req.tools`（标准 Responses/Chat 形状）
+/// 2. `input` 数组里 `type:"additional_tools"` 的条目（Codex 通过它注入 exec/wait 等工具）
+///
+/// 支持的工具类型：
+/// - `function`：扁平 `{name,description,parameters}` 或嵌套 `{function:{...}}` → Anthropic 标准工具
+/// - `custom`（Codex `exec` 等 freeform/grammar 工具）：合成一个 `{input:string}` 的 schema，
+///   并记入 custom 集合，供响应侧改用 `custom_tool_call` 输出
+/// 其他无 name 的内置类型（local_shell/web_search 等）跳过。
+fn collect_and_convert_tools(req: &ResponsesRequest) -> (Option<Value>, HashSet<String>) {
+    let mut raw: Vec<Value> = Vec::new();
+    if let Some(ts) = &req.tools {
+        raw.extend(ts.iter().cloned());
+    }
+    if let Value::Array(items) = &req.input {
+        for it in items {
+            if it.get("type").and_then(|v| v.as_str()) == Some("additional_tools") {
+                if let Some(ts) = it.get("tools").and_then(|v| v.as_array()) {
+                    raw.extend(ts.iter().cloned());
+                }
+            }
         }
+    }
+
+    let mut out: Vec<Value> = Vec::new();
+    let mut custom: HashSet<String> = HashSet::new();
+    for t in &raw {
+        let ttype = t.get("type").and_then(|v| v.as_str()).unwrap_or("function");
         let (name, desc, params) = if let Some(f) = t.get("function") {
             (f.get("name"), f.get("description"), f.get("parameters"))
         } else {
@@ -420,17 +483,51 @@ fn convert_responses_tools(tools: &Option<Vec<Value>>) -> Option<Value> {
             continue;
         }
         let desc = desc.and_then(|v| v.as_str()).unwrap_or("");
-        let params = params
-            .cloned()
-            .filter(|p| p.is_object())
-            .unwrap_or_else(|| json!({ "type": "object", "properties": {} }));
-        out.push(json!({
-            "name": name,
-            "description": desc,
-            "input_schema": params,
-        }));
+        if ttype == "custom" {
+            custom.insert(name.to_string());
+            out.push(json!({
+                "name": name,
+                "description": desc,
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "input": { "type": "string", "description": "Raw text input for this tool" }
+                    },
+                    "required": ["input"]
+                }
+            }));
+        } else {
+            let params = params
+                .cloned()
+                .filter(|p| p.is_object())
+                .unwrap_or_else(|| json!({ "type": "object", "properties": {} }));
+            out.push(json!({
+                "name": name,
+                "description": desc,
+                "input_schema": params,
+            }));
+        }
     }
-    if out.is_empty() { None } else { Some(Value::Array(out)) }
+
+    (
+        if out.is_empty() {
+            None
+        } else {
+            Some(Value::Array(out))
+        },
+        custom,
+    )
+}
+
+/// 从工具调用参数（JSON 字符串）中提取 custom 工具的原始文本输入。
+/// 若参数是 `{"input":"..."}` 取其 input；否则原样返回参数字符串。
+fn extract_custom_input(args: &str) -> String {
+    if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(args) {
+        if let Some(Value::String(s)) = map.get("input") {
+            return s.clone();
+        }
+    }
+    args.to_string()
 }
 
 /// content（string | parts 数组）→ 纯文本
@@ -492,8 +589,9 @@ fn output_items_to_anthropic(items: &[Value], messages: &mut Vec<Value>) {
 
 // ============ 响应：Anthropic → Responses output items ============
 
-/// Anthropic content blocks → Responses output items（1 个 message + N 个 function_call）
-fn anthropic_content_to_output(blocks: &[Value]) -> Vec<Value> {
+/// Anthropic content blocks → Responses output items（1 个 message + N 个工具调用）
+/// custom_tools 中的工具名会输出为 `custom_tool_call`（input 为原始文本），其余为 `function_call`。
+fn anthropic_content_to_output(blocks: &[Value], custom_tools: &HashSet<String>) -> Vec<Value> {
     let mut output: Vec<Value> = Vec::new();
     let mut text = String::new();
     let mut tool_items: Vec<Value> = Vec::new();
@@ -512,14 +610,25 @@ fn anthropic_content_to_output(blocks: &[Value]) -> Vec<Value> {
                     .get("input")
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "{}".to_string());
-                tool_items.push(json!({
-                    "id": gen_id("fc"),
-                    "type": "function_call",
-                    "status": "completed",
-                    "call_id": id,
-                    "name": name,
-                    "arguments": arguments,
-                }));
+                if custom_tools.contains(&name) {
+                    tool_items.push(json!({
+                        "id": gen_id("ctc"),
+                        "type": "custom_tool_call",
+                        "status": "completed",
+                        "call_id": id,
+                        "name": name,
+                        "input": extract_custom_input(&arguments),
+                    }));
+                } else {
+                    tool_items.push(json!({
+                        "id": gen_id("fc"),
+                        "type": "function_call",
+                        "status": "completed",
+                        "call_id": id,
+                        "name": name,
+                        "arguments": arguments,
+                    }));
+                }
             }
             _ => {}
         }
@@ -596,9 +705,9 @@ fn build_responses_object(
 
 // ============ 请求体构建 ============
 
-/// 构建请求 & 内部 Anthropic body。返回 (anthropic_body_value, resp_id, store_flag)
+/// 构建内部 Anthropic body。返回 (anthropic_body_value, custom_tool_names)。
 /// Err(Response) 表示应立即返回的错误。
-fn build_anthropic_body(req: &ResponsesRequest) -> Result<Value, Response> {
+fn build_anthropic_body(req: &ResponsesRequest) -> Result<(Value, HashSet<String>), Response> {
     let mut system: Vec<Value> = Vec::new();
     let mut messages: Vec<Value> = Vec::new();
 
@@ -642,14 +751,15 @@ fn build_anthropic_body(req: &ResponsesRequest) -> Result<Value, Response> {
     if !system.is_empty() {
         body["system"] = Value::Array(system);
     }
-    if let Some(tools) = convert_responses_tools(&req.tools) {
+    let (tools, custom_tools) = collect_and_convert_tools(req);
+    if let Some(tools) = tools {
         body["tools"] = tools;
     }
     if let Some(tc) = convert_tool_choice(req.tool_choice.clone()) {
         body["tool_choice"] = tc;
     }
 
-    Ok(body)
+    Ok((body, custom_tools))
 }
 
 // ============ 主 Handler ============
@@ -677,17 +787,61 @@ pub async fn post_responses(State(state): State<AppState>, body: Bytes) -> Respo
     let prev_id = req.previous_response_id.clone();
     let metadata = req.metadata.clone();
 
+    let tool_types: Vec<String> = req
+        .tools
+        .as_ref()
+        .map(|ts| {
+            ts.iter()
+                .map(|t| {
+                    t.get("type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?")
+                        .to_string()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let tool_names: Vec<String> = req
+        .tools
+        .as_ref()
+        .map(|ts| {
+            ts.iter()
+                .map(|t| {
+                    t.get("name")
+                        .or_else(|| t.get("function").and_then(|f| f.get("name")))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?")
+                        .to_string()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     tracing::info!(
         model = %req.model,
         stream = %is_stream,
         has_prev = %prev_id.as_deref().map(|s| !s.is_empty()).unwrap_or(false),
+        tools_count = req.tools.as_ref().map(|t| t.len()).unwrap_or(0),
+        tool_types = ?tool_types,
+        tool_names = ?tool_names,
+        tool_choice = ?req.tool_choice,
         "Received POST /v1/responses request"
     );
 
-    let anthropic_value = match build_anthropic_body(&req) {
+    // 调试：设置 KIRO_DEBUG_DUMP=1 时把原始请求体落盘，便于抓取客户端真实格式
+    if std::env::var("KIRO_DEBUG_DUMP").is_ok() {
+        let _ = std::fs::write("/tmp/kiro_last_responses_req.json", &body);
+    }
+
+    let (anthropic_value, custom_tools) = match build_anthropic_body(&req) {
         Ok(v) => v,
         Err(resp) => return resp,
     };
+
+    if std::env::var("KIRO_DEBUG_DUMP").is_ok() {
+        if let Ok(s) = serde_json::to_vec_pretty(&anthropic_value) {
+            let _ = std::fs::write("/tmp/kiro_last_anthropic_body.json", s);
+        }
+    }
 
     let anthropic_body = match serde_json::to_vec(&anthropic_value) {
         Ok(b) => Bytes::from(b),
@@ -730,6 +884,7 @@ pub async fn post_responses(State(state): State<AppState>, body: Bytes) -> Respo
         store_flag,
         stored_input,
         stored_instr,
+        custom_tools,
     };
 
     if is_stream {
@@ -749,6 +904,8 @@ struct StoreCtx {
     store_flag: bool,
     stored_input: Value,
     stored_instr: Option<String>,
+    /// custom 类型工具名集合（响应侧对这些工具改用 custom_tool_call 输出）
+    custom_tools: HashSet<String>,
 }
 
 /// 非流式：Anthropic JSON → Responses 对象
@@ -779,7 +936,7 @@ async fn non_stream_responses(response: Response, ctx: StoreCtx) -> Response {
         .get("content")
         .and_then(|c| c.as_array())
         .unwrap_or(&empty);
-    let output = anthropic_content_to_output(blocks);
+    let output = anthropic_content_to_output(blocks, &ctx.custom_tools);
     let (input_tokens, output_tokens) = usage_from_anthropic(&anthropic);
 
     let obj = build_responses_object(
@@ -955,6 +1112,7 @@ enum BlockKind {
         call_id: String,
         name: String,
         args: String,
+        is_custom: bool,
     },
 }
 
@@ -1043,7 +1201,6 @@ impl ResponsesStreamTranslator {
                         );
                     }
                     "tool_use" => {
-                        let item_id = gen_id("fc");
                         let oi = self.next_output_index;
                         self.next_output_index += 1;
                         let call_id = block
@@ -1056,21 +1213,41 @@ impl ResponsesStreamTranslator {
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
-                        out.push(sse_frame(
-                            "response.output_item.added",
-                            &json!({
-                                "type": "response.output_item.added",
-                                "output_index": oi,
-                                "item": {
-                                    "id": item_id,
-                                    "type": "function_call",
-                                    "status": "in_progress",
-                                    "call_id": call_id,
-                                    "name": name,
-                                    "arguments": "",
-                                }
-                            }),
-                        ));
+                        let is_custom = self.ctx.custom_tools.contains(&name);
+                        let item_id = gen_id(if is_custom { "ctc" } else { "fc" });
+                        if is_custom {
+                            out.push(sse_frame(
+                                "response.output_item.added",
+                                &json!({
+                                    "type": "response.output_item.added",
+                                    "output_index": oi,
+                                    "item": {
+                                        "id": item_id,
+                                        "type": "custom_tool_call",
+                                        "status": "in_progress",
+                                        "call_id": call_id,
+                                        "name": name,
+                                        "input": "",
+                                    }
+                                }),
+                            ));
+                        } else {
+                            out.push(sse_frame(
+                                "response.output_item.added",
+                                &json!({
+                                    "type": "response.output_item.added",
+                                    "output_index": oi,
+                                    "item": {
+                                        "id": item_id,
+                                        "type": "function_call",
+                                        "status": "in_progress",
+                                        "call_id": call_id,
+                                        "name": name,
+                                        "arguments": "",
+                                    }
+                                }),
+                            ));
+                        }
                         self.blocks.insert(
                             idx,
                             BlockKind::Tool {
@@ -1079,6 +1256,7 @@ impl ResponsesStreamTranslator {
                                 call_id,
                                 name,
                                 args: String::new(),
+                                is_custom,
                             },
                         );
                     }
@@ -1125,19 +1303,24 @@ impl ResponsesStreamTranslator {
                                 item_id,
                                 output_index,
                                 args,
+                                is_custom,
                                 ..
                             }) = self.blocks.get_mut(&idx)
                             {
                                 args.push_str(pj);
-                                out.push(sse_frame(
-                                    "response.function_call_arguments.delta",
-                                    &json!({
-                                        "type": "response.function_call_arguments.delta",
-                                        "item_id": item_id.clone(),
-                                        "output_index": *output_index,
-                                        "delta": pj,
-                                    }),
-                                ));
+                                // custom 工具需从完整 JSON 里抽出 input 文本，无法增量转发，
+                                // 仅缓冲，待 content_block_stop 时一次性发出。
+                                if !*is_custom {
+                                    out.push(sse_frame(
+                                        "response.function_call_arguments.delta",
+                                        &json!({
+                                            "type": "response.function_call_arguments.delta",
+                                            "item_id": item_id.clone(),
+                                            "output_index": *output_index,
+                                            "delta": pj,
+                                        }),
+                                    ));
+                                }
                             }
                         }
                     }
@@ -1187,33 +1370,73 @@ impl ResponsesStreamTranslator {
                             call_id,
                             name,
                             args,
+                            is_custom,
                         } => {
-                            let item = json!({
-                                "id": item_id,
-                                "type": "function_call",
-                                "status": "completed",
-                                "call_id": call_id,
-                                "name": name,
-                                "arguments": args,
-                            });
-                            out.push(sse_frame(
-                                "response.function_call_arguments.done",
-                                &json!({
-                                    "type": "response.function_call_arguments.done",
-                                    "item_id": item_id,
-                                    "output_index": output_index,
+                            if is_custom {
+                                let input = extract_custom_input(&args);
+                                out.push(sse_frame(
+                                    "response.custom_tool_call_input.delta",
+                                    &json!({
+                                        "type": "response.custom_tool_call_input.delta",
+                                        "item_id": item_id,
+                                        "output_index": output_index,
+                                        "delta": input,
+                                    }),
+                                ));
+                                out.push(sse_frame(
+                                    "response.custom_tool_call_input.done",
+                                    &json!({
+                                        "type": "response.custom_tool_call_input.done",
+                                        "item_id": item_id,
+                                        "output_index": output_index,
+                                        "input": input,
+                                    }),
+                                ));
+                                let item = json!({
+                                    "id": item_id,
+                                    "type": "custom_tool_call",
+                                    "status": "completed",
+                                    "call_id": call_id,
+                                    "name": name,
+                                    "input": input,
+                                });
+                                out.push(sse_frame(
+                                    "response.output_item.done",
+                                    &json!({
+                                        "type": "response.output_item.done",
+                                        "output_index": output_index,
+                                        "item": item,
+                                    }),
+                                ));
+                                self.completed_items.push(item);
+                            } else {
+                                let item = json!({
+                                    "id": item_id,
+                                    "type": "function_call",
+                                    "status": "completed",
+                                    "call_id": call_id,
+                                    "name": name,
                                     "arguments": args,
-                                }),
-                            ));
-                            out.push(sse_frame(
-                                "response.output_item.done",
-                                &json!({
-                                    "type": "response.output_item.done",
-                                    "output_index": output_index,
-                                    "item": item,
-                                }),
-                            ));
-                            self.completed_items.push(item);
+                                });
+                                out.push(sse_frame(
+                                    "response.function_call_arguments.done",
+                                    &json!({
+                                        "type": "response.function_call_arguments.done",
+                                        "item_id": item_id,
+                                        "output_index": output_index,
+                                        "arguments": args,
+                                    }),
+                                ));
+                                out.push(sse_frame(
+                                    "response.output_item.done",
+                                    &json!({
+                                        "type": "response.output_item.done",
+                                        "output_index": output_index,
+                                        "item": item,
+                                    }),
+                                ));
+                                self.completed_items.push(item);
+                            }
                         }
                     }
                 }
@@ -1312,6 +1535,7 @@ mod tests {
             store_flag: false,
             stored_input: json!("hi"),
             stored_instr: None,
+            custom_tools: HashSet::new(),
         }
     }
 
@@ -1391,7 +1615,7 @@ mod tests {
             "tools":[{"type":"function","function":{"name":"f","description":"d","parameters":{"type":"object","properties":{}}}}],
             "tool_choice":"auto"
         })).unwrap();
-        let body = build_anthropic_body(&req).unwrap();
+        let (body, _custom) = build_anthropic_body(&req).unwrap();
         assert_eq!(body["model"], "claude-sonnet-5");
         assert_eq!(body["max_tokens"], 1024);
         assert_eq!(body["system"][0]["text"], "你是猫娘");
@@ -1406,7 +1630,7 @@ mod tests {
             json!({"type":"text","text":"答案"}),
             json!({"type":"tool_use","id":"tu1","name":"calc","input":{"x":1}}),
         ];
-        let out = anthropic_content_to_output(&blocks);
+        let out = anthropic_content_to_output(&blocks, &HashSet::new());
         assert_eq!(out.len(), 2);
         assert_eq!(out[0]["type"], "message");
         assert_eq!(out[0]["content"][0]["type"], "output_text");
@@ -1419,7 +1643,7 @@ mod tests {
 
     #[test]
     fn test_anthropic_to_output_empty_fallback() {
-        let out = anthropic_content_to_output(&[]);
+        let out = anthropic_content_to_output(&[], &HashSet::new());
         assert_eq!(out.len(), 1);
         assert_eq!(out[0]["type"], "message");
         assert_eq!(out[0]["content"][0]["text"], "");
@@ -1516,7 +1740,7 @@ mod tests {
             "previous_response_id":"resp_prev",
             "input":"第二轮问题"
         })).unwrap();
-        let body = build_anthropic_body(&req).unwrap();
+        let (body, _custom) = build_anthropic_body(&req).unwrap();
         let msgs = body["messages"].as_array().unwrap();
         // 历史: user(第一轮问题) + assistant(第一轮回答) + 本轮 user(第二轮问题)
         assert_eq!(msgs.len(), 3);
@@ -1526,6 +1750,81 @@ mod tests {
         assert_eq!(msgs[2]["content"], "第二轮问题");
         // 祖先 instructions 进入 system
         assert_eq!(body["system"][0]["text"], "系统提示");
+    }
+
+    #[test]
+    fn test_codex_additional_tools_extraction() {
+        // 模拟 Codex 请求：工具藏在 input 的 additional_tools 条目里，含 custom(exec) 与 function(wait)
+        let req: ResponsesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.6-luna",
+            "input": [
+                {"type":"additional_tools","role":"developer","tools":[
+                    {"type":"custom","name":"exec","description":"run js","format":{"type":"grammar"}},
+                    {"type":"function","name":"wait","description":"wait","parameters":{"type":"object","properties":{"ms":{"type":"number"}}}}
+                ]},
+                {"type":"message","role":"user","content":[{"type":"input_text","text":"列出目录"}]}
+            ],
+            "stream": true
+        })).unwrap();
+        let (body, custom) = build_anthropic_body(&req).unwrap();
+        // 两个工具都应转换出来
+        let tools = body["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 2);
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"exec"));
+        assert!(names.contains(&"wait"));
+        // exec 是 custom
+        assert!(custom.contains("exec"));
+        assert!(!custom.contains("wait"));
+        // exec 应有合成的 {input:string} schema
+        let exec = tools.iter().find(|t| t["name"] == "exec").unwrap();
+        assert_eq!(exec["input_schema"]["properties"]["input"]["type"], "string");
+        // additional_tools 不应变成消息；只有 user 消息
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["role"], "user");
+    }
+
+    #[test]
+    fn test_custom_tool_call_output_nonstream() {
+        // custom 工具的非流式输出应为 custom_tool_call，input 取自 {"input": ...}
+        let mut custom = HashSet::new();
+        custom.insert("exec".to_string());
+        let blocks = vec![json!({
+            "type":"tool_use","id":"call_1","name":"exec",
+            "input":{"input":"await tools.shell('ls')"}
+        })];
+        let out = anthropic_content_to_output(&blocks, &custom);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["type"], "custom_tool_call");
+        assert_eq!(out[0]["call_id"], "call_1");
+        assert_eq!(out[0]["name"], "exec");
+        assert_eq!(out[0]["input"], "await tools.shell('ls')");
+    }
+
+    #[test]
+    fn test_stream_custom_tool_call() {
+        let mut c = ctx();
+        c.custom_tools.insert("exec".to_string());
+        let mut t = ResponsesStreamTranslator::new(c);
+        let mut frames = Vec::new();
+        frames.extend(t.handle("content_block_start", &json!({"index":0,"content_block":{"type":"tool_use","id":"call_e","name":"exec"}})));
+        frames.extend(t.handle("content_block_delta", &json!({"index":0,"delta":{"type":"input_json_delta","partial_json":"{\"input\":\"ls "}})));
+        frames.extend(t.handle("content_block_delta", &json!({"index":0,"delta":{"type":"input_json_delta","partial_json":"-la\"}"}})));
+        frames.extend(t.handle("content_block_stop", &json!({"index":0})));
+        frames.extend(t.handle("message_stop", &json!({})));
+
+        let evts = parse_frames(&frames);
+        let names: Vec<&str> = evts.iter().map(|(e, _)| e.as_str()).collect();
+        // custom 工具用 custom_tool_call_input 事件，而非 function_call_arguments
+        assert!(names.contains(&"response.custom_tool_call_input.done"));
+        assert!(!names.contains(&"response.function_call_arguments.delta"));
+        // output_item.added 类型应为 custom_tool_call
+        let added = evts.iter().find(|(e, _)| e == "response.output_item.added").unwrap();
+        assert_eq!(added.1["item"]["type"], "custom_tool_call");
+        // input.done 里是解出来的原始文本
+        let done = evts.iter().find(|(e, _)| e == "response.custom_tool_call_input.done").unwrap();
+        assert_eq!(done.1["input"], "ls -la");
     }
 
     #[test]
