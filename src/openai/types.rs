@@ -81,7 +81,7 @@ pub struct OaFunctionCall {
 }
 
 /// OpenAI 工具定义
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[allow(dead_code)]
 pub struct OaTool {
     #[serde(rename = "type", default)]
@@ -90,7 +90,7 @@ pub struct OaTool {
 }
 
 /// OpenAI 工具函数定义
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct OaToolFunction {
     pub name: String,
     #[serde(default)]

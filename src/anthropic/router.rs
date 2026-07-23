@@ -56,6 +56,10 @@ pub fn create_router_with_provider(
             "/chat/completions",
             post(crate::openai::handlers::post_chat_completions),
         )
+        .route(
+            "/responses",
+            post(crate::openai::responses::post_responses),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,

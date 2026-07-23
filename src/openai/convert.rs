@@ -174,7 +174,7 @@ fn openai_content_to_anthropic(content: &Value) -> Value {
 }
 
 /// data:URL（base64）或普通 URL → Anthropic image block
-fn image_url_to_anthropic(url: &str) -> Value {
+pub(crate) fn image_url_to_anthropic(url: &str) -> Value {
     if let Some(rest) = url.strip_prefix("data:") {
         // data:<media_type>;base64,<data>
         if let Some((meta, data)) = rest.split_once(',') {
@@ -191,7 +191,7 @@ fn image_url_to_anthropic(url: &str) -> Value {
     })
 }
 
-fn convert_tools(tools: Option<Vec<super::types::OaTool>>) -> Option<Value> {
+pub(crate) fn convert_tools(tools: Option<Vec<super::types::OaTool>>) -> Option<Value> {
     let tools = tools?;
     if tools.is_empty() {
         return None;
@@ -213,7 +213,7 @@ fn convert_tools(tools: Option<Vec<super::types::OaTool>>) -> Option<Value> {
 }
 
 /// OpenAI tool_choice → Anthropic tool_choice
-fn convert_tool_choice(choice: Option<Value>) -> Option<Value> {
+pub(crate) fn convert_tool_choice(choice: Option<Value>) -> Option<Value> {
     let choice = choice?;
     match &choice {
         Value::String(s) => match s.as_str() {

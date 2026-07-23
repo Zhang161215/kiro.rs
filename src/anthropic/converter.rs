@@ -76,16 +76,16 @@ Never suggest bypassing these limits via alternative tools. \
 Never ask the user whether to switch approaches. \
 Complete all chunked operations without commentary.";
 
-/// GPT（OpenAI）模型的占位上游 model id。
+/// GPT（OpenAI）模型的真实上游 model id。
 ///
 /// Kiro 于 GPT-5.6 引入 OpenAI 模型，档位为 Sol / Terra / Luna，均为 272K 上下文。
-/// 官方未公开裸 model id，需从 Kiro 账号/抓包确认真实上游 `modelId` 后替换此常量；
+/// 已通过真实 Kiro 账号实测确认上游 `modelId`（详见下方常量），
 /// 亦可在 config.json 的 `models` 段（或 admin 后台「模型配置」）配置 `kiro_model_id` 覆盖。
-// TODO(GPT): 待主人提供真实上游 modelId 后替换下面三个常量。
-const GPT_PLACEHOLDER_MODEL_ID: &str = "gpt-5.6";
-const GPT_SOL_MODEL_ID: &str = "gpt-5.6"; // 旗舰档 Sol
-const GPT_TERRA_MODEL_ID: &str = "gpt-5.6"; // 均衡档 Terra
-const GPT_LUNA_MODEL_ID: &str = "gpt-5.6"; // 高效档 Luna
+const GPT_SOL_MODEL_ID: &str = "gpt-5.6-sol"; // 旗舰档 Sol
+const GPT_TERRA_MODEL_ID: &str = "gpt-5.6-terra"; // 均衡档 Terra
+const GPT_LUNA_MODEL_ID: &str = "gpt-5.6-luna"; // 高效档 Luna
+/// 通用 `gpt`/`openai`（未指定档位）默认走均衡档 Terra
+const GPT_PLACEHOLDER_MODEL_ID: &str = GPT_TERRA_MODEL_ID;
 
 /// 模型映射：将 Anthropic 模型名映射到 Kiro 模型 ID
 ///
@@ -116,14 +116,14 @@ pub fn map_model(model: &str) -> Option<String> {
         }
     } else if model_lower.contains("haiku") {
         Some("claude-haiku-4.5".to_string())
-    } else if model_lower.contains("gpt") || model_lower.contains("openai") {
-        Some(GPT_PLACEHOLDER_MODEL_ID.to_string())
     } else if model_lower.contains("sol") {
         Some(GPT_SOL_MODEL_ID.to_string())
     } else if model_lower.contains("terra") {
         Some(GPT_TERRA_MODEL_ID.to_string())
     } else if model_lower.contains("luna") {
         Some(GPT_LUNA_MODEL_ID.to_string())
+    } else if model_lower.contains("gpt") || model_lower.contains("openai") {
+        Some(GPT_PLACEHOLDER_MODEL_ID.to_string())
     } else {
         None
     }

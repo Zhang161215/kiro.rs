@@ -5,4 +5,5 @@
 
 pub mod convert;
 pub mod handlers;
+pub mod responses;
 pub mod types;
