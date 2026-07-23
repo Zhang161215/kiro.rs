@@ -135,9 +135,11 @@ struct BillingHeaderRectifyResult {
 }
 
 fn is_billing_header_line(text: &str) -> bool {
-    let trimmed = text.trim_start();
-    trimmed.len() >= BILLING_HEADER_PREFIX.len()
-        && trimmed[..BILLING_HEADER_PREFIX.len()].eq_ignore_ascii_case(BILLING_HEADER_PREFIX)
+    // 按字节比较，避免对非 ASCII（如中文）文本用字节索引切片时落在字符中间导致 panic。
+    // BILLING_HEADER_PREFIX 是纯 ASCII，字节级 eq_ignore_ascii_case 语义正确。
+    let trimmed = text.trim_start().as_bytes();
+    let prefix = BILLING_HEADER_PREFIX.as_bytes();
+    trimmed.len() >= prefix.len() && trimmed[..prefix.len()].eq_ignore_ascii_case(prefix)
 }
 
 fn rectify_billing_header(system: &mut Option<Vec<SystemMessage>>) -> BillingHeaderRectifyResult {

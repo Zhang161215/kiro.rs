@@ -657,16 +657,48 @@ fn anthropic_content_to_output(blocks: &[Value], custom_tools: &HashSet<String>)
     output
 }
 
-fn usage_from_anthropic(anthropic: &Value) -> (i32, i32) {
-    let input = anthropic
-        .pointer("/usage/input_tokens")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0) as i32;
-    let output = anthropic
-        .pointer("/usage/output_tokens")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0) as i32;
-    (input, output)
+/// token 用量（对齐 OpenAI Responses 口径：input_tokens 含缓存，cached 为其子集）
+#[derive(Debug, Clone, Copy, Default)]
+struct RespUsage {
+    /// 总输入 tokens（含缓存读取 + 缓存写入 + 未缓存）
+    input_tokens: i32,
+    /// 其中命中缓存的 tokens
+    cached_tokens: i32,
+    output_tokens: i32,
+}
+
+impl RespUsage {
+    fn to_value(self) -> Value {
+        json!({
+            "input_tokens": self.input_tokens,
+            "input_tokens_details": { "cached_tokens": self.cached_tokens },
+            "output_tokens": self.output_tokens,
+            "output_tokens_details": { "reasoning_tokens": 0 },
+            "total_tokens": self.input_tokens + self.output_tokens,
+        })
+    }
+}
+
+/// 从 Anthropic 用量字段换算 Responses 用量。
+///
+/// Anthropic 的 `input_tokens` 是“未缓存”部分，缓存另计在
+/// `cache_read_input_tokens` / `cache_creation_input_tokens`；
+/// 而 OpenAI 的 `input_tokens` 是总输入、`cached_tokens` 是其中命中缓存的子集。
+fn usage_from_anthropic(anthropic: &Value) -> RespUsage {
+    let pick = |k: &str| {
+        anthropic
+            .pointer(&format!("/usage/{}", k))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as i32
+    };
+    let uncached = pick("input_tokens");
+    let cache_read = pick("cache_read_input_tokens");
+    let cache_creation = pick("cache_creation_input_tokens");
+    RespUsage {
+        input_tokens: uncached + cache_read + cache_creation,
+        cached_tokens: cache_read,
+        output_tokens: pick("output_tokens"),
+    }
 }
 
 fn build_responses_object(
@@ -674,8 +706,7 @@ fn build_responses_object(
     model: &str,
     created: i64,
     output: &[Value],
-    input_tokens: i32,
-    output_tokens: i32,
+    usage: RespUsage,
     prev_id: &Option<String>,
     metadata: &Option<HashMap<String, String>>,
 ) -> Value {
@@ -686,11 +717,7 @@ fn build_responses_object(
         "status": "completed",
         "model": model,
         "output": output,
-        "usage": {
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "total_tokens": input_tokens + output_tokens,
-        },
+        "usage": usage.to_value(),
     });
     if let Some(p) = prev_id {
         if !p.is_empty() {
@@ -937,15 +964,14 @@ async fn non_stream_responses(response: Response, ctx: StoreCtx) -> Response {
         .and_then(|c| c.as_array())
         .unwrap_or(&empty);
     let output = anthropic_content_to_output(blocks, &ctx.custom_tools);
-    let (input_tokens, output_tokens) = usage_from_anthropic(&anthropic);
+    let usage = usage_from_anthropic(&anthropic);
 
     let obj = build_responses_object(
         &ctx.resp_id,
         &ctx.model,
         ctx.created,
         &output,
-        input_tokens,
-        output_tokens,
+        usage,
         &ctx.prev_id,
         &ctx.metadata,
     );
@@ -1121,7 +1147,10 @@ struct ResponsesStreamTranslator {
     next_output_index: i32,
     blocks: HashMap<i64, BlockKind>,
     completed_items: Vec<Value>,
+    /// 总输入 tokens（含缓存）
     input_tokens: i32,
+    /// 其中命中缓存的 tokens
+    cached_tokens: i32,
     output_tokens: i32,
     finished: bool,
 }
@@ -1134,6 +1163,7 @@ impl ResponsesStreamTranslator {
             blocks: HashMap::new(),
             completed_items: Vec::new(),
             input_tokens: 0,
+            cached_tokens: 0,
             output_tokens: 0,
             finished: false,
         }
@@ -1147,12 +1177,17 @@ impl ResponsesStreamTranslator {
         let mut out: Vec<String> = Vec::new();
         match event {
             "message_start" => {
-                if let Some(it) = data
-                    .pointer("/message/usage/input_tokens")
-                    .and_then(|v| v.as_i64())
-                {
-                    self.input_tokens = it as i32;
-                }
+                // Anthropic: input_tokens 为未缓存部分，缓存另计；换算为 OpenAI 口径
+                let pick = |k: &str| {
+                    data.pointer(&format!("/message/usage/{}", k))
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0) as i32
+                };
+                let uncached = pick("input_tokens");
+                let cache_read = pick("cache_read_input_tokens");
+                let cache_creation = pick("cache_creation_input_tokens");
+                self.input_tokens = uncached + cache_read + cache_creation;
+                self.cached_tokens = cache_read;
             }
             "content_block_start" => {
                 let idx = data.get("index").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -1442,11 +1477,19 @@ impl ResponsesStreamTranslator {
                 }
             }
             "message_delta" => {
-                if let Some(ot) = data
-                    .pointer("/usage/output_tokens")
-                    .and_then(|v| v.as_i64())
-                {
-                    self.output_tokens = ot as i32;
+                // kiro.rs 把（模拟的）缓存拆分放在 message_delta.usage 里：
+                // input_tokens(未缓存) + cache_read + cache_creation。若存在则以此为准重算。
+                if let Some(usage) = data.get("usage") {
+                    let pick = |k: &str| usage.get(k).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                    let cache_read = pick("cache_read_input_tokens");
+                    let cache_creation = pick("cache_creation_input_tokens");
+                    if cache_read > 0 || cache_creation > 0 {
+                        self.input_tokens = pick("input_tokens") + cache_read + cache_creation;
+                        self.cached_tokens = cache_read;
+                    }
+                    if let Some(ot) = usage.get("output_tokens").and_then(|v| v.as_i64()) {
+                        self.output_tokens = ot as i32;
+                    }
                 }
             }
             "message_stop" => {
@@ -1478,8 +1521,11 @@ impl ResponsesStreamTranslator {
             &self.ctx.model,
             self.ctx.created,
             &output,
-            self.input_tokens,
-            self.output_tokens,
+            RespUsage {
+                input_tokens: self.input_tokens,
+                cached_tokens: self.cached_tokens,
+                output_tokens: self.output_tokens,
+            },
             &self.ctx.prev_id,
             &self.ctx.metadata,
         );
