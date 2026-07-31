@@ -18,6 +18,10 @@ export interface CredentialStatusItem {
   hasProfileArn: boolean
   email?: string
   refreshTokenHash?: string
+  /** kiroApiKey 的 SHA-256（仅 API Key 凭据，前端去重用） */
+  apiKeyHash?: string
+  /** kiroApiKey 的脱敏展示（仅 API Key 凭据） */
+  maskedApiKey?: string
   successCount: number
   lastUsedAt: string | null
   hasProxy: boolean
@@ -94,8 +98,11 @@ export interface SetPriorityRequest {
 
 // 添加凭据请求
 export interface AddCredentialRequest {
-  refreshToken: string
-  authMethod?: 'social' | 'idc' | 'external_idp'
+  /** OAuth 凭据必填；API Key 凭据不需要（后端已是 Option<String>） */
+  refreshToken?: string
+  authMethod?: 'social' | 'idc' | 'external_idp' | 'api_key'
+  /** Kiro API Key（authMethod 为 api_key 时必填，格式 ksk_xxx） */
+  kiroApiKey?: string
   clientId?: string
   clientSecret?: string
   priority?: number

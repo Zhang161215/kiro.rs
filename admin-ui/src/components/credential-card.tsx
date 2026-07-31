@@ -297,6 +297,12 @@ export function CredentialCard({
                 <span className="text-sm text-muted-foreground ml-1">未知</span>
               )}
             </div>
+            {credential.maskedApiKey && (
+              <div className="col-span-2">
+                <span className="text-muted-foreground">API Key：</span>
+                <span className="font-mono font-medium">{credential.maskedApiKey}</span>
+              </div>
+            )}
             {credential.hasProxy && (
               <div className="col-span-2">
                 <span className="text-muted-foreground">代理：</span>

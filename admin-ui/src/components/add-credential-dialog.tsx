@@ -17,10 +17,12 @@ interface AddCredentialDialogProps {
   onOpenChange: (open: boolean) => void
 }
 
-type AuthMethod = 'social' | 'idc' | 'external_idp'
+type AuthMethod = 'social' | 'idc' | 'external_idp' | 'api_key'
 
 export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogProps) {
   const [refreshToken, setRefreshToken] = useState('')
+  // Kiro API Key（headless 模式）：直接作为 Bearer Token 使用，无 refreshToken、不参与刷新
+  const [kiroApiKey, setKiroApiKey] = useState('')
   const [authMethod, setAuthMethod] = useState<AuthMethod>('social')
   const [authRegion, setAuthRegion] = useState('')
   const [apiRegion, setApiRegion] = useState('')
@@ -41,6 +43,7 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
 
   const resetForm = () => {
     setRefreshToken('')
+    setKiroApiKey('')
     setAuthMethod('social')
     setAuthRegion('')
     setApiRegion('')
@@ -57,11 +60,22 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
     setProfileArn('')
   }
 
+  const isApiKey = authMethod === 'api_key'
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
 
-    // 验证必填字段
-    if (!refreshToken.trim()) {
+    // API Key 凭据没有 refreshToken，改为校验 kiroApiKey
+    if (isApiKey) {
+      if (!kiroApiKey.trim()) {
+        toast.error('请输入 Kiro API Key')
+        return
+      }
+      if (!kiroApiKey.trim().startsWith('ksk_')) {
+        toast.error('Kiro API Key 应以 ksk_ 开头，请检查是否粘贴了完整的 Key')
+        return
+      }
+    } else if (!refreshToken.trim()) {
       toast.error('请输入 Refresh Token')
       return
     }
@@ -85,7 +99,10 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
 
     mutate(
       {
-        refreshToken: refreshToken.trim(),
+        // 两者互斥：API Key 凭据不带 refreshToken，OAuth 凭据不带 kiroApiKey
+        ...(isApiKey
+          ? { kiroApiKey: kiroApiKey.trim() }
+          : { refreshToken: refreshToken.trim() }),
         authMethod,
         authRegion: authRegion.trim() || undefined,
         apiRegion: apiRegion.trim() || undefined,
@@ -127,20 +144,41 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
 
         <form onSubmit={handleSubmit} className="flex flex-col min-h-0 flex-1">
           <div className="space-y-4 py-4 overflow-y-auto flex-1 pr-1">
-            {/* Refresh Token */}
-            <div className="space-y-2">
-              <label htmlFor="refreshToken" className="text-sm font-medium">
-                Refresh Token <span className="text-red-500">*</span>
-              </label>
-              <Input
-                id="refreshToken"
-                type="password"
-                placeholder="请输入 Refresh Token"
-                value={refreshToken}
-                onChange={(e) => setRefreshToken(e.target.value)}
-                disabled={isPending}
-              />
-            </div>
+            {/* 凭据主体：API Key 与 Refresh Token 互斥 */}
+            {isApiKey ? (
+              <div className="space-y-2">
+                <label htmlFor="kiroApiKey" className="text-sm font-medium">
+                  Kiro API Key <span className="text-red-500">*</span>
+                </label>
+                <Input
+                  id="kiroApiKey"
+                  type="password"
+                  placeholder="ksk_xxxxxxxxxxxxxxxx"
+                  value={kiroApiKey}
+                  onChange={(e) => setKiroApiKey(e.target.value)}
+                  disabled={isPending}
+                />
+                <p className="text-xs text-muted-foreground">
+                  直接作为 Bearer Token 使用，无需 Refresh Token，也不会参与 Token 刷新。
+                  若你的 Key 是 <span className="font-mono">ksk_xxx----用户名----密码----region----登录地址</span>{' '}
+                  这种格式，只填第一段 <span className="font-mono">ksk_</span> 开头的部分。
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <label htmlFor="refreshToken" className="text-sm font-medium">
+                  Refresh Token <span className="text-red-500">*</span>
+                </label>
+                <Input
+                  id="refreshToken"
+                  type="password"
+                  placeholder="请输入 Refresh Token"
+                  value={refreshToken}
+                  onChange={(e) => setRefreshToken(e.target.value)}
+                  disabled={isPending}
+                />
+              </div>
+            )}
 
             {/* 认证方式 */}
             <div className="space-y-2">
@@ -157,6 +195,7 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
                 <option value="social">Social</option>
                 <option value="idc">IdC/Builder-ID/IAM</option>
                 <option value="external_idp">企业 SSO (Entra ID / Azure AD)</option>
+                <option value="api_key">Kiro API Key (headless)</option>
               </select>
             </div>
 
