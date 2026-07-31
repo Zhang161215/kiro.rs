@@ -128,6 +128,17 @@ pub struct KiroCredentials {
     /// 端点名必须在启动时注册的端点 registry 中存在。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
+
+    /// 临时凭据标记：仅存在于内存，永不回写 credentials.json
+    ///
+    /// 目前唯一来源是 `KIRO_API_KEY` 环境变量注入的 API Key 凭据。
+    /// 用环境变量传密钥的意图就是不落盘，但启动时补全 id/machineId 会触发
+    /// `persist_credentials()`，把 key 明文写进文件——既破坏"临时"语义
+    /// （下次不设环境变量它还在），也把密钥留在了磁盘上。
+    ///
+    /// `#[serde(skip)]` 保证它既不被读入也不被写出，对既有配置文件完全透明。
+    #[serde(skip)]
+    pub ephemeral: bool,
 }
 
 /// 判断是否为零（用于跳过序列化）
@@ -392,6 +403,7 @@ mod tests {
             disabled: false,
             kiro_api_key: None,
             endpoint: None,
+            ephemeral: false,
         };
 
         let json = creds.to_pretty_json().unwrap();
@@ -514,6 +526,7 @@ mod tests {
             disabled: false,
             kiro_api_key: None,
             endpoint: None,
+            ephemeral: false,
         };
 
         let json = creds.to_pretty_json().unwrap();
@@ -549,6 +562,7 @@ mod tests {
             disabled: false,
             kiro_api_key: None,
             endpoint: None,
+            ephemeral: false,
         };
 
         let json = creds.to_pretty_json().unwrap();
@@ -667,6 +681,7 @@ mod tests {
             disabled: false,
             kiro_api_key: None,
             endpoint: None,
+            ephemeral: false,
         };
 
         let json = original.to_pretty_json().unwrap();

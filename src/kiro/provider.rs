@@ -228,14 +228,24 @@ impl KiroProvider {
             // 401/403 凭据问题
             if matches!(status.as_u16(), 401 | 403) {
                 // token 被上游失效：先尝试 force-refresh，每凭据仅一次机会
-                if endpoint.is_bearer_token_invalid(&body) && !force_refreshed.contains(&ctx.id) {
-                    force_refreshed.insert(ctx.id);
-                    tracing::info!("凭据 #{} token 疑似被上游失效，尝试强制刷新", ctx.id);
-                    if self.token_manager.force_refresh_token_for(ctx.id).await.is_ok() {
-                        tracing::info!("凭据 #{} token 强制刷新成功，重试请求", ctx.id);
-                        continue;
+                if endpoint.is_bearer_token_invalid(&body) {
+                    if ctx.credentials.is_api_key_credential() {
+                        // API Key 没有 refreshToken，force_refresh_token_for 必然被
+                        // refresh_token() 开头的契约级 bail 拦掉。绕这一圈的唯一后果是
+                        // 把「key 本身无效」记成「刷新失败」，排查时会被带偏。
+                        tracing::warn!(
+                            "凭据 #{} 的 Kiro API Key 被上游拒绝（无效或已撤销），API Key 不支持刷新，计入失败",
+                            ctx.id
+                        );
+                    } else if !force_refreshed.contains(&ctx.id) {
+                        force_refreshed.insert(ctx.id);
+                        tracing::info!("凭据 #{} token 疑似被上游失效，尝试强制刷新", ctx.id);
+                        if self.token_manager.force_refresh_token_for(ctx.id).await.is_ok() {
+                            tracing::info!("凭据 #{} token 强制刷新成功，重试请求", ctx.id);
+                            continue;
+                        }
+                        tracing::warn!("凭据 #{} token 强制刷新失败，计入失败", ctx.id);
                     }
-                    tracing::warn!("凭据 #{} token 强制刷新失败，计入失败", ctx.id);
                 }
 
                 let has_available = self.token_manager.report_failure(ctx.id);
@@ -474,19 +484,28 @@ impl KiroProvider {
                 );
 
                 // token 被上游失效：先尝试 force-refresh，每凭据仅一次机会
-                if endpoint.is_bearer_token_invalid(&body) && !force_refreshed.contains(&ctx.id) {
-                    force_refreshed.insert(ctx.id);
-                    tracing::info!("凭据 #{} token 疑似被上游失效，尝试强制刷新", ctx.id);
-                    if self
-                        .token_manager
-                        .force_refresh_token_for(ctx.id)
-                        .await
-                        .is_ok()
-                    {
-                        tracing::info!("凭据 #{} token 强制刷新成功，重试请求", ctx.id);
-                        continue;
+                if endpoint.is_bearer_token_invalid(&body) {
+                    if ctx.credentials.is_api_key_credential() {
+                        // 同上：API Key 无 refreshToken，刷新是注定失败的空转，
+                        // 只会把「key 无效」误报成「刷新失败」。
+                        tracing::warn!(
+                            "凭据 #{} 的 Kiro API Key 被上游拒绝（无效或已撤销），API Key 不支持刷新，计入失败",
+                            ctx.id
+                        );
+                    } else if !force_refreshed.contains(&ctx.id) {
+                        force_refreshed.insert(ctx.id);
+                        tracing::info!("凭据 #{} token 疑似被上游失效，尝试强制刷新", ctx.id);
+                        if self
+                            .token_manager
+                            .force_refresh_token_for(ctx.id)
+                            .await
+                            .is_ok()
+                        {
+                            tracing::info!("凭据 #{} token 强制刷新成功，重试请求", ctx.id);
+                            continue;
+                        }
+                        tracing::warn!("凭据 #{} token 强制刷新失败，计入失败", ctx.id);
                     }
-                    tracing::warn!("凭据 #{} token 强制刷新失败，计入失败", ctx.id);
                 }
 
                 let has_available = self.token_manager.report_failure(ctx.id);

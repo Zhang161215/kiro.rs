@@ -286,6 +286,8 @@ impl AdminService {
             disabled: false, // 新添加的凭据默认启用
             kiro_api_key: req.kiro_api_key,
             endpoint: req.endpoint,
+            // 经 Admin API 主动添加的凭据必须落盘，否则重启即丢
+            ephemeral: false,
         };
 
         // 调用 token_manager 添加凭据

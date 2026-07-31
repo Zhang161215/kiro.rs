@@ -61,11 +61,14 @@ async fn main() {
         if kiro_api_key.is_empty() {
             tracing::warn!("KIRO_API_KEY 环境变量已设置但为空，视为未配置");
         } else {
-            tracing::info!("检测到 KIRO_API_KEY 环境变量，添加 API Key 凭据（最高优先级）");
+            tracing::info!("检测到 KIRO_API_KEY 环境变量，添加 API Key 凭据（最高优先级，不落盘）");
             let api_key_cred = KiroCredentials {
                 kiro_api_key: Some(kiro_api_key),
                 auth_method: Some("api_key".to_string()),
                 priority: 0,
+                // 环境变量注入的密钥仅存在于内存，避免被 persist_credentials 写进
+                // credentials.json（否则"临时注入"会变成永久明文落盘）
+                ephemeral: true,
                 ..Default::default()
             };
             credentials_list.insert(0, api_key_cred);

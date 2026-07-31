@@ -1449,11 +1449,12 @@ impl MultiTokenManager {
             None => return Ok(false),
         };
 
-        // 收集所有凭据
+        // 收集所有凭据（跳过 ephemeral：环境变量注入的密钥不落盘）
         let credentials: Vec<KiroCredentials> = {
             let entries = self.entries.lock();
             entries
                 .iter()
+                .filter(|e| !e.credentials.ephemeral)
                 .map(|e| {
                     let mut cred = e.credentials.clone();
                     cred.canonicalize_auth_method();
@@ -3136,6 +3137,62 @@ mod tests {
         let manager = MultiTokenManager::new(config, vec![cred], None, None, false).unwrap();
         assert_eq!(manager.total_count(), 1);
         assert_eq!(manager.available_count(), 1);
+    }
+
+    /// ephemeral 凭据（KIRO_API_KEY 环境变量注入）不得被回写到 credentials.json。
+    ///
+    /// 回归背景：启动时若有凭据需要补全 id/machineId，`new()` 会调用
+    /// `persist_credentials()` 把内存里的全部凭据写盘。环境变量注入的 API Key
+    /// 也在其中，导致密钥明文落盘，且下次不设环境变量它依然生效——
+    /// 与"临时注入"的语义相悖。
+    #[test]
+    fn test_ephemeral_credential_not_persisted() {
+        let path = std::env::temp_dir()
+            .join(format!("kiro-ephemeral-{}.json", uuid::Uuid::new_v4()));
+        std::fs::write(&path, "[]").unwrap();
+
+        // 环境变量注入的 API Key 凭据
+        let mut env_cred = KiroCredentials::default();
+        env_cred.auth_method = Some("api_key".to_string());
+        env_cred.kiro_api_key = Some("ksk_secret_from_env".to_string());
+        env_cred.ephemeral = true;
+
+        // 来自文件的普通凭据，必须照常回写
+        let mut file_cred = KiroCredentials::default();
+        file_cred.refresh_token = Some("rt_from_file".to_string());
+
+        let manager = MultiTokenManager::new(
+            Config::default(),
+            vec![env_cred, file_cred],
+            None,
+            Some(path.clone()),
+            true, // is_multiple_format：只有多凭据格式才会回写
+        )
+        .unwrap();
+
+        // 两个凭据在内存中都可用，ephemeral 不影响运行时行为
+        assert_eq!(manager.total_count(), 2);
+
+        // new() 内部已因补全 id/machineId 触发过一次 persist
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !content.contains("ksk_secret_from_env"),
+            "环境变量注入的 API Key 不应落盘，实际文件内容: {}",
+            content
+        );
+        assert!(
+            content.contains("rt_from_file"),
+            "来自文件的凭据应正常回写，实际文件内容: {}",
+            content
+        );
+
+        // 显式再 persist 一次，确认不是"恰好没触发"而是真的被过滤
+        manager.persist_credentials().unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(!content.contains("ksk_secret_from_env"));
+
+        drop(manager);
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
