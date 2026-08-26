@@ -61,6 +61,8 @@ jobs:
       - name: Determine version
         id: version
         run: |
+          OWNER=$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')
+          echo "owner=${OWNER}" >> $GITHUB_OUTPUT
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
             echo "is_beta=false" >> $GITHUB_OUTPUT
@@ -93,8 +95,8 @@ jobs:
           push: true
           provenance: false
           tags: |
-            ghcr.io/${{ github.repository_owner }}/kiro-rs:${{ steps.version.outputs.version }}-amd64
-            ghcr.io/${{ github.repository_owner }}/kiro-rs:${{ steps.version.outputs.version }}
+            ghcr.io/${{ steps.version.outputs.owner }}/kiro-rs:${{ steps.version.outputs.version }}-amd64
+            ghcr.io/${{ steps.version.outputs.owner }}/kiro-rs:${{ steps.version.outputs.version }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.description=Kiro.rs Docker Image
