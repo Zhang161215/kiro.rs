@@ -36,6 +36,9 @@ export function parseError(error: unknown): ParsedError {
 
   const axiosError = error as Record<string, unknown>
   const response = axiosError.response as Record<string, unknown> | undefined
+  if (response?.status === 401) {
+    return { title: 'Admin Key 无效，请重新登录', type: 'authentication_error' }
+  }
   const data = response?.data as Record<string, unknown> | undefined
   const errorObj = data?.error as Record<string, unknown> | undefined
 
@@ -195,4 +198,31 @@ function sha256Pure(data: Uint8Array): string {
   return [h0, h1, h2, h3, h4, h5, h6, h7]
     .map(v => (v >>> 0).toString(16).padStart(8, '0'))
     .join('')
+}
+
+/**
+ * 数量语义的紧凑展示（K / M / B）。
+ * < 1000 原样输出；≥ 1000 使用 compact notation，最多 1 位小数。
+ */
+export function formatNumber(value: number | null | undefined): string {
+  if (value == null || Number.isNaN(value)) return '0'
+  if (Math.abs(value) < 1000) return String(value)
+  return new Intl.NumberFormat('en-US', {
+    notation: 'compact',
+    maximumFractionDigits: 1,
+  }).format(value)
+}
+
+/**
+ * Credit 计费量展示：保留 3 位小数；≥ 1000 时走 K/M/B。
+ */
+export function formatCredits(value: number | null | undefined): string {
+  if (value == null || Number.isNaN(value) || value <= 0) return '0'
+  if (value >= 1000) {
+    return new Intl.NumberFormat('en-US', {
+      notation: 'compact',
+      maximumFractionDigits: 1,
+    }).format(value)
+  }
+  return value.toFixed(3)
 }

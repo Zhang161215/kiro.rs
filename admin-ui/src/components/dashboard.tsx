@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { RefreshCw, Plus, Upload, FileUp, Trash2, RotateCcw, CheckCircle2, LayoutList, Database } from 'lucide-react'
+import { Plus, Upload, FileUp, Trash2, RotateCcw, CheckCircle2, Eye, EyeOff, RefreshCw } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { storage } from '@/lib/storage'
@@ -12,8 +12,7 @@ import { AddCredentialDialog } from '@/components/add-credential-dialog'
 import { BatchImportDialog } from '@/components/batch-import-dialog'
 import { KamImportDialog } from '@/components/kam-import-dialog'
 import { BatchVerifyDialog, type VerifyResult } from '@/components/batch-verify-dialog'
-import { RequestDetailsPanel } from '@/components/request-details-panel'
-import { useCredentials, useDeleteCredential, useResetFailure, useLoadBalancingMode, useSetLoadBalancingMode } from '@/hooks/use-credentials'
+import { useCredentials, useDeleteCredential, useResetFailure } from '@/hooks/use-credentials'
 import { getCredentialBalance, forceRefreshToken } from '@/api/credentials'
 import { extractErrorMessage } from '@/lib/utils'
 import type { BalanceResponse } from '@/types/api'
@@ -23,7 +22,6 @@ interface DashboardProps {
 }
 
 export function Dashboard({ onLogout }: DashboardProps) {
-  const [activeTab, setActiveTab] = useState<'credentials' | 'details'>('credentials')
   const [selectedCredentialId, setSelectedCredentialId] = useState<number | null>(null)
   const [balanceDialogOpen, setBalanceDialogOpen] = useState(false)
   const [addDialogOpen, setAddDialogOpen] = useState(false)
@@ -41,31 +39,44 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const [batchRefreshing, setBatchRefreshing] = useState(false)
   const [batchRefreshProgress, setBatchRefreshProgress] = useState({ current: 0, total: 0 })
   const cancelVerifyRef = useRef(false)
+  // 已自动拉取过用量的凭据。失败的也记进来，避免坏凭据被无限重试
+  const autoBalanceAttempted = useRef<Set<number>>(new Set())
   const [currentPage, setCurrentPage] = useState(1)
+  const [hideDisabled, setHideDisabled] = useState(() => storage.getHideDisabled())
   const itemsPerPage = 12
 
   const queryClient = useQueryClient()
   const { data, isLoading, error, refetch } = useCredentials()
   const { mutate: deleteCredential } = useDeleteCredential()
   const { mutate: resetFailure } = useResetFailure()
-  const { data: loadBalancingData, isLoading: isLoadingMode } = useLoadBalancingMode()
-  const { mutate: setLoadBalancingMode, isPending: isSettingMode } = useSetLoadBalancingMode()
 
-  // 计算分页
-  const totalPages = Math.ceil((data?.credentials.length || 0) / itemsPerPage)
+  // 先过滤再分页：若只在渲染时跳过已禁用的，页码和每页数量都会算错
+  const visibleCredentials = hideDisabled
+    ? (data?.credentials.filter(credential => !credential.disabled) || [])
+    : (data?.credentials || [])
+
+  const totalPages = Math.ceil(visibleCredentials.length / itemsPerPage)
   const startIndex = (currentPage - 1) * itemsPerPage
   const endIndex = startIndex + itemsPerPage
-  const currentCredentials = data?.credentials.slice(startIndex, endIndex) || []
+  const currentCredentials = visibleCredentials.slice(startIndex, endIndex)
   const disabledCredentialCount = data?.credentials.filter(credential => credential.disabled).length || 0
   const selectedDisabledCount = Array.from(selectedIds).filter(id => {
     const credential = data?.credentials.find(c => c.id === id)
     return Boolean(credential?.disabled)
   }).length
 
-  // 当凭据列表变化时重置到第一页
+  // 凭据数量或筛选条件变化时回到第一页，避免停留在已不存在的页码上
   useEffect(() => {
     setCurrentPage(1)
-  }, [data?.credentials.length])
+  }, [data?.credentials.length, hideDisabled])
+
+  const toggleHideDisabled = () => {
+    setHideDisabled(prev => {
+      const next = !prev
+      storage.setHideDisabled(next)
+      return next
+    })
+  }
 
   // 只保留当前仍存在的凭据缓存，避免删除后残留旧数据
   useEffect(() => {
@@ -76,6 +87,12 @@ export function Dashboard({ onLogout }: DashboardProps) {
     }
 
     const validIds = new Set(data.credentials.map(credential => credential.id))
+
+    autoBalanceAttempted.current.forEach(id => {
+      if (!validIds.has(id)) {
+        autoBalanceAttempted.current.delete(id)
+      }
+    })
 
     setBalanceMap(prev => {
       const next = new Map<number, BalanceResponse>()
@@ -101,14 +118,62 @@ export function Dashboard({ onLogout }: DashboardProps) {
     })
   }, [data?.credentials])
 
+  // 当前页启用凭据的用量自动加载。后端 get_balance 带 TTL 缓存，命中时几乎无开销，
+  // 未命中才回源，所以这里限制并发，避免一页十几个凭据同时打上游。
+  const pageBalanceKey = currentCredentials.map(credential => credential.id).join(',')
+
+  useEffect(() => {
+    const pending = currentCredentials
+      .filter(credential => !credential.disabled)
+      .map(credential => credential.id)
+      .filter(id => !balanceMap.has(id) && !autoBalanceAttempted.current.has(id))
+
+    if (pending.length === 0) {
+      return
+    }
+
+    pending.forEach(id => autoBalanceAttempted.current.add(id))
+
+    let cancelled = false
+    const queue = [...pending]
+
+    const worker = async () => {
+      while (!cancelled) {
+        const id = queue.shift()
+        if (id === undefined) {
+          return
+        }
+
+        setLoadingBalanceIds(prev => new Set(prev).add(id))
+        try {
+          const balance = await getCredentialBalance(id)
+          if (!cancelled) {
+            setBalanceMap(prev => new Map(prev).set(id, balance))
+          }
+        } catch {
+          // 静默失败：卡片维持未查询态，用户仍可用「查询信息」手动重试
+        } finally {
+          setLoadingBalanceIds(prev => {
+            const next = new Set(prev)
+            next.delete(id)
+            return next
+          })
+        }
+      }
+    }
+
+    const concurrency = Math.min(3, queue.length)
+    void Promise.all(Array.from({ length: concurrency }, worker))
+
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pageBalanceKey])
+
   const handleViewBalance = (id: number) => {
     setSelectedCredentialId(id)
     setBalanceDialogOpen(true)
-  }
-
-  const handleRefresh = () => {
-    refetch()
-    toast.success('已刷新凭据列表')
   }
 
   const handleLogout = () => {
@@ -482,40 +547,24 @@ export function Dashboard({ onLogout }: DashboardProps) {
     setVerifying(false)
   }
 
-  // 切换负载均衡模式
-  const handleToggleLoadBalancing = () => {
-    const currentMode = loadBalancingData?.mode || 'priority'
-    const newMode = currentMode === 'priority' ? 'balanced' : 'priority'
-
-    setLoadBalancingMode(newMode, {
-      onSuccess: () => {
-        const modeName = newMode === 'priority' ? '优先级模式' : '均衡负载模式'
-        toast.success(`已切换到${modeName}`)
-      },
-      onError: (error) => {
-        toast.error(`切换失败: ${extractErrorMessage(error)}`)
-      }
-    })
-  }
-
-  if (isLoading) {
+  if (isLoading && !data) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-background">
+      <div className="flex items-center justify-center py-20">
         <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto mb-4"></div>
+          <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-primary mx-auto mb-4"></div>
           <p className="text-muted-foreground">加载中...</p>
         </div>
       </div>
     )
   }
 
-  if (error) {
+  if (error && !data) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-background p-4">
+      <div className="flex items-center justify-center py-16 px-4">
         <Card className="w-full max-w-md">
           <CardContent className="pt-6 text-center">
             <div className="text-red-500 mb-4">加载失败</div>
-            <p className="text-muted-foreground mb-4">{(error as Error).message}</p>
+            <p className="text-muted-foreground mb-4">{extractErrorMessage(error)}</p>
             <div className="space-x-2">
               <Button onClick={() => refetch()}>重试</Button>
               <Button variant="outline" onClick={handleLogout}>重新登录</Button>
@@ -528,62 +577,6 @@ export function Dashboard({ onLogout }: DashboardProps) {
 
   return (
     <div className="animate-fade-in">
-      {/* 子 Tab + 工具栏 */}
-      <div className="mb-6 flex items-end justify-between gap-3 flex-wrap">
-        <div className="inline-flex items-center gap-1 rounded-full border border-border/60 p-0.5">
-          <button
-            className={`inline-flex items-center gap-1.5 px-3 h-7 text-xs font-medium rounded-full transition-colors ${
-              activeTab === 'credentials'
-                ? 'bg-primary text-primary-foreground'
-                : 'text-muted-foreground hover:text-foreground'
-            }`}
-            onClick={() => setActiveTab('credentials')}
-          >
-            <LayoutList className="h-3.5 w-3.5" />
-            凭据管理
-          </button>
-          <button
-            className={`inline-flex items-center gap-1.5 px-3 h-7 text-xs font-medium rounded-full transition-colors ${
-              activeTab === 'details'
-                ? 'bg-primary text-primary-foreground'
-                : 'text-muted-foreground hover:text-foreground'
-            }`}
-            onClick={() => setActiveTab('details')}
-          >
-            <Database className="h-3.5 w-3.5" />
-            请求记录
-          </button>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-8 rounded-full"
-            onClick={handleToggleLoadBalancing}
-            disabled={isLoadingMode || isSettingMode}
-            title="切换负载均衡模式"
-          >
-            {isLoadingMode
-              ? '加载中…'
-              : loadBalancingData?.mode === 'priority'
-                ? '优先级模式'
-                : '均衡负载'}
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-8 rounded-full"
-            onClick={handleRefresh}
-            title="刷新数据"
-          >
-            <RefreshCw className="h-3.5 w-3.5 mr-1" />
-            刷新
-          </Button>
-        </div>
-      </div>
-
-        {activeTab === 'credentials' ? (
-          <>
         {/* 统计卡片 */}
         <div className="grid gap-4 md:grid-cols-3 mb-6">
           <Card>
@@ -625,14 +618,15 @@ export function Dashboard({ onLogout }: DashboardProps) {
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-4">
-              <h2 className="text-xl font-semibold">凭据管理</h2>
-              {selectedIds.size > 0 && (
+              {selectedIds.size > 0 ? (
                 <div className="flex items-center gap-2">
                   <Badge variant="secondary">已选择 {selectedIds.size} 个</Badge>
                   <Button onClick={deselectAll} size="sm" variant="ghost">
                     取消选择
                   </Button>
                 </div>
+              ) : (
+                <span className="text-sm text-muted-foreground">共 {data?.total || 0} 个凭据</span>
               )}
             </div>
             <div className="flex gap-2">
@@ -673,6 +667,17 @@ export function Dashboard({ onLogout }: DashboardProps) {
                   验活中... {verifyProgress.current}/{verifyProgress.total}
                 </Button>
               )}
+              {disabledCredentialCount > 0 && (
+                <Button
+                  onClick={toggleHideDisabled}
+                  size="sm"
+                  variant={hideDisabled ? 'secondary' : 'outline'}
+                  title={hideDisabled ? `已隐藏 ${disabledCredentialCount} 个禁用凭据` : '从列表中隐藏已禁用凭据'}
+                >
+                  {hideDisabled ? <EyeOff className="h-4 w-4 mr-2" /> : <Eye className="h-4 w-4 mr-2" />}
+                  {hideDisabled ? `已隐藏禁用 (${disabledCredentialCount})` : `隐藏已禁用 (${disabledCredentialCount})`}
+                </Button>
+              )}
               {data?.credentials && data.credentials.length > 0 && (
                 <Button
                   onClick={handleQueryCurrentPageInfo}
@@ -711,10 +716,10 @@ export function Dashboard({ onLogout }: DashboardProps) {
               </Button>
             </div>
           </div>
-          {data?.credentials.length === 0 ? (
+          {visibleCredentials.length === 0 ? (
             <Card>
               <CardContent className="py-8 text-center text-muted-foreground">
-                暂无凭据
+                {data?.credentials.length ? '当前筛选下没有凭据，可关闭「隐藏已禁用」查看' : '暂无凭据'}
               </CardContent>
             </Card>
           ) : (
@@ -745,7 +750,8 @@ export function Dashboard({ onLogout }: DashboardProps) {
                     上一页
                   </Button>
                   <span className="text-sm text-muted-foreground">
-                    第 {currentPage} / {totalPages} 页（共 {data?.credentials.length} 个凭据）
+                    第 {currentPage} / {totalPages} 页（共 {visibleCredentials.length} 个凭据
+                    {hideDisabled && disabledCredentialCount > 0 ? `，已隐藏 ${disabledCredentialCount} 个禁用` : ''}）
                   </span>
                   <Button
                     variant="outline"
@@ -760,10 +766,6 @@ export function Dashboard({ onLogout }: DashboardProps) {
             </>
           )}
         </div>
-          </>
-        ) : activeTab === 'details' ? (
-          <RequestDetailsPanel />
-        ) : null}
 
       {/* 余额对话框 */}
       <BalanceDialog

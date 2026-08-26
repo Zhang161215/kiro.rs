@@ -370,6 +370,71 @@ pub struct UpdateCredentialRequest {
     pub proxy_password: Option<String>,
 }
 
+// ============ 代理连通性检测 ============
+
+/// 检测指定代理的请求。
+///
+/// 不传 `proxy_url` 时表示检测该凭据当前配置的代理（含已保存的用户名 / 密码），
+/// 传了则检测这一组待保存的参数，便于在写库前先试通。
+/// 只传 URL、账密为空时，后端会回退到该凭据已保存的账密（编辑页不回显密码）。
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyCheckRequest {
+    pub proxy_url: Option<String>,
+    pub proxy_username: Option<String>,
+    pub proxy_password: Option<String>,
+}
+
+/// 代理检测结果
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyCheckResponse {
+    /// 是否连通
+    pub ok: bool,
+    /// 被检测的代理地址；凭据未配置代理时为 None
+    pub proxy_url: Option<String>,
+    /// 往返延迟，仅连通时有值
+    pub latency_ms: Option<u32>,
+    /// 失败原因，仅不通时有值
+    pub error: Option<String>,
+}
+
+// ============ 代理 IP 池 ============
+
+/// 添加单个代理
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddProxyRequest {
+    pub url: String,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+/// 批量添加代理（每行一个）
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchAddProxyRequest {
+    pub urls: Vec<String>,
+}
+
+/// 启停代理
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetProxyEnabledRequest {
+    pub enabled: bool,
+}
+
+/// 把某代理分配给一组凭据；或按轮询分配（roundRobin=true 时忽略 url）
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssignProxyRequest {
+    #[serde(default)]
+    pub proxy_url: Option<String>,
+    pub credential_ids: Vec<u64>,
+    #[serde(default)]
+    pub round_robin: bool,
+}
+
 // ============ 超额开关 ============
 
 /// 超额开关请求

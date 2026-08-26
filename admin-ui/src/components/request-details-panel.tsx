@@ -178,6 +178,7 @@ export function RequestDetailsPanel() {
               <thead>
                 <tr className="border-b bg-muted/50">
                   <th className="text-left px-3 py-2 font-medium text-muted-foreground">时间</th>
+                  <th className="text-left px-3 py-2 font-medium text-muted-foreground">凭据</th>
                   <th className="text-left px-3 py-2 font-medium text-muted-foreground">模型</th>
                   <th className="text-left px-3 py-2 font-medium text-muted-foreground">端点</th>
                   <th className="text-right px-3 py-2 font-medium text-muted-foreground">输入</th>
@@ -192,6 +193,9 @@ export function RequestDetailsPanel() {
                 {records.map((r, i) => (
                   <tr key={r.requestId + i} className="border-b last:border-0 hover:bg-muted/30 transition-colors">
                     <td className="px-3 py-1.5 text-xs text-muted-foreground tabular-nums whitespace-nowrap">{formatTime(r.recordedAt)}</td>
+                    <td className="px-3 py-1.5 text-xs text-muted-foreground tabular-nums whitespace-nowrap">
+                      {r.credentialId ? `#${r.credentialId}` : '—'}
+                    </td>
                     <td className="px-3 py-1.5">
                       <span className={`font-medium text-xs ${modelColor(r.model)}`}>{modelShortName(r.model)}</span>
                     </td>

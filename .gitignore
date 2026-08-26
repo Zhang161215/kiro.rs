@@ -13,6 +13,10 @@
 /kiro_balance_cache.json
 /kiro_stats.json
 /kiro_kv_cache_records.jsonl
+/kiro_prompt_failure_records.jsonl
+/proxy_pool.json
+/kiro-rs-bin
+/.cred-pull/
 
 # macOS / 备份文件
 .DS_Store

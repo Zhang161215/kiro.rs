@@ -3,17 +3,21 @@
 use axum::{
     Json,
     extract::{Path, Query, State},
+    http::StatusCode,
     response::IntoResponse,
 };
 
 use super::{
     middleware::AdminState,
     types::{
-        AddCredentialRequest, RequestDetailsQuery, SetDisabledRequest,
-        SetKvCacheConfigRequest, SetLoadBalancingModeRequest, SetModelsRequest, SetOverageRequest,
-        SetPriorityRequest, SuccessResponse, UpdateCredentialRequest,
+        AddCredentialRequest, AddProxyRequest, AssignProxyRequest, BatchAddProxyRequest,
+        ProxyCheckRequest, RequestDetailsQuery, SetDisabledRequest, SetKvCacheConfigRequest,
+        SetLoadBalancingModeRequest, SetModelsRequest, SetOverageRequest, SetPriorityRequest,
+        SetProxyEnabledRequest, SuccessResponse, UpdateCredentialRequest,
     },
 };
+use axum::Json as AxumJson;
+use serde_json::json;
 
 /// GET /api/admin/credentials
 /// 获取所有凭据状态
@@ -222,6 +226,127 @@ pub async fn update_credential(
     }
 }
 
+/// POST /api/admin/credentials/:id/proxy-check
+/// 检测代理连通性。请求体可省略，省略时检测该凭据已保存的代理。
+pub async fn check_credential_proxy(
+    State(state): State<AdminState>,
+    Path(id): Path<u64>,
+    payload: Option<Json<ProxyCheckRequest>>,
+) -> impl IntoResponse {
+    let req = payload.map(|Json(req)| req).unwrap_or_default();
+    match state.service.check_proxy(id, req).await {
+        Ok(resp) => Json(resp).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+// ============ 代理 IP 池 ============
+
+/// GET /api/admin/proxy-pool
+pub async fn list_proxies(State(state): State<AdminState>) -> impl IntoResponse {
+    Json(json!({ "proxies": state.service.list_proxies() }))
+}
+
+/// POST /api/admin/proxy-pool  添加单个代理
+pub async fn add_proxy(
+    State(state): State<AdminState>,
+    Json(payload): Json<AddProxyRequest>,
+) -> impl IntoResponse {
+    match state.service.add_proxy(payload.url, payload.label) {
+        Ok(entry) => AxumJson(entry).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/proxy-pool/batch  批量添加
+pub async fn batch_add_proxies(
+    State(state): State<AdminState>,
+    Json(payload): Json<BatchAddProxyRequest>,
+) -> impl IntoResponse {
+    let (added, errors) = state.service.batch_add_proxies(payload.urls);
+    Json(json!({ "added": added, "errors": errors }))
+}
+
+/// DELETE /api/admin/proxy-pool/:id
+pub async fn delete_proxy(
+    State(state): State<AdminState>,
+    Path(id): Path<u64>,
+) -> impl IntoResponse {
+    match state.service.delete_proxy(id) {
+        Ok(_) => Json(SuccessResponse::new(format!("代理 #{} 已删除", id))).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/proxy-pool/:id/enabled
+pub async fn set_proxy_enabled(
+    State(state): State<AdminState>,
+    Path(id): Path<u64>,
+    Json(payload): Json<SetProxyEnabledRequest>,
+) -> impl IntoResponse {
+    match state.service.set_proxy_enabled(id, payload.enabled) {
+        Ok(_) => Json(SuccessResponse::new(format!(
+            "代理 #{} 已{}",
+            id,
+            if payload.enabled { "启用" } else { "禁用" }
+        )))
+        .into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/proxy-pool/:id/check  探测单个代理
+pub async fn check_pool_proxy(
+    State(state): State<AdminState>,
+    Path(id): Path<u64>,
+) -> impl IntoResponse {
+    match state.service.check_pool_proxy(id).await {
+        Ok(entry) => AxumJson(entry).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/proxy-pool/check-all  探测全部
+pub async fn check_all_proxies(State(state): State<AdminState>) -> impl IntoResponse {
+    let (healthy, unhealthy, auto_disabled) = state.service.check_all_pool_proxies().await;
+    Json(json!({
+        "healthy": healthy,
+        "unhealthy": unhealthy,
+        "autoDisabled": auto_disabled,
+    }))
+}
+
+/// POST /api/admin/proxy-pool/assign  分配代理给凭据
+pub async fn assign_proxy(
+    State(state): State<AdminState>,
+    Json(payload): Json<AssignProxyRequest>,
+) -> impl IntoResponse {
+    if payload.round_robin {
+        return match state.service.assign_proxies_round_robin(&payload.credential_ids) {
+            Ok((assigned, proxies)) => Json(json!({
+                "assigned": assigned,
+                "proxies": proxies,
+            }))
+            .into_response(),
+            Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+        };
+    }
+
+    match payload.proxy_url {
+        Some(url) if !url.trim().is_empty() => {
+            let assigned = state
+                .service
+                .assign_proxy_to_credentials(url.trim(), &payload.credential_ids);
+            Json(json!({ "assigned": assigned })).into_response()
+        }
+        _ => (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "缺少 proxyUrl 或未指定 roundRobin" })),
+        )
+            .into_response(),
+    }
+}
+
 /// POST /api/admin/credentials/:id/overage
 /// 切换超额开关（占位实现）
 pub async fn set_credential_overage(
@@ -246,4 +371,78 @@ pub async fn set_credential_overage(
 /// 查看 API Key 与 Admin API Key（脱敏 + 原值，仅授权后台返回）
 pub async fn get_admin_keys(State(state): State<AdminState>) -> impl IntoResponse {
     Json(state.service.get_admin_keys()).into_response()
+}
+
+fn stats_window(
+    params: &std::collections::HashMap<String, String>,
+) -> Result<super::usage_stats::StatsQueryWindow, String> {
+    super::usage_stats::parse_stats_window(
+        params.get("range").map(String::as_str),
+        params.get("startDate").map(String::as_str),
+        params.get("endDate").map(String::as_str),
+        params.get("granularity").map(String::as_str),
+    )
+}
+
+fn stats_bad_request(message: String) -> axum::response::Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(super::types::AdminErrorResponse::invalid_request(message)),
+    )
+        .into_response()
+}
+
+/// GET /api/admin/stats/overview
+pub async fn stats_overview(State(state): State<AdminState>) -> impl IntoResponse {
+    let (overview, available, total) = state.service.stats_overview();
+    Json(json!({
+        "todayCalls": overview.today_calls,
+        "todayInputTokens": overview.today_input_tokens,
+        "todayOutputTokens": overview.today_output_tokens,
+        "todayErrors": overview.today_errors,
+        "todayCredits": overview.today_credits,
+        "weekCalls": overview.week_calls,
+        "weekInputTokens": overview.week_input_tokens,
+        "weekOutputTokens": overview.week_output_tokens,
+        "weekCredits": overview.week_credits,
+        "activeClientKeys": 0,
+        "activeCredentials": available,
+        "totalCredentials": total,
+    }))
+}
+
+/// GET /api/admin/stats/timeseries?range=24h|7d|30d&granularity=hour|day
+pub async fn stats_timeseries(
+    State(state): State<AdminState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    let window = match stats_window(&params) {
+        Ok(window) => window,
+        Err(message) => return stats_bad_request(message),
+    };
+    Json(state.service.stats_timeseries(window)).into_response()
+}
+
+/// GET /api/admin/stats/by-model
+pub async fn stats_by_model(
+    State(state): State<AdminState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    let window = match stats_window(&params) {
+        Ok(window) => window,
+        Err(message) => return stats_bad_request(message),
+    };
+    Json(state.service.stats_by_model(window)).into_response()
+}
+
+/// GET /api/admin/stats/by-credential
+pub async fn stats_by_credential(
+    State(state): State<AdminState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    let window = match stats_window(&params) {
+        Ok(window) => window,
+        Err(message) => return stats_bad_request(message),
+    };
+    Json(state.service.stats_by_credential(window)).into_response()
 }

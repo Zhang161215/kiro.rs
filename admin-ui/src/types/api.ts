@@ -47,6 +47,8 @@ export interface BalanceResponse {
 }
 
 // 更新凭据请求（PATCH /credentials/:id）
+//
+// 后端约定：空字符串 = 清除该字段，null / 省略 = 保持原值
 export interface UpdateCredentialRequest {
   email?: string | null
   authRegion?: string | null
@@ -54,6 +56,60 @@ export interface UpdateCredentialRequest {
   proxyUrl?: string | null
   proxyUsername?: string | null
   proxyPassword?: string | null
+}
+
+// 代理检测请求（POST /credentials/:id/proxy-check）
+// 不传字段表示检测该凭据已保存的代理
+export interface ProxyCheckRequest {
+  proxyUrl?: string | null
+  proxyUsername?: string | null
+  proxyPassword?: string | null
+}
+
+export interface ProxyCheckResponse {
+  ok: boolean
+  proxyUrl?: string | null
+  latencyMs?: number | null
+  error?: string | null
+}
+
+// ============ 代理 IP 池 ============
+
+export type ProxyHealth = 'unknown' | 'healthy' | 'unhealthy'
+
+export interface ProxyEntry {
+  id: number
+  url: string
+  username?: string | null
+  password?: string | null
+  label?: string | null
+  enabled: boolean
+  health: ProxyHealth
+  latencyMs?: number | null
+  lastCheckedAt?: string | null
+  consecutiveFailures: number
+  autoDisabled: boolean
+}
+
+export interface ProxyPoolResponse {
+  proxies: ProxyEntry[]
+}
+
+export interface BatchAddProxyResult {
+  added: number
+  errors: string[]
+}
+
+export interface CheckAllProxiesResult {
+  healthy: number
+  unhealthy: number
+  autoDisabled: number
+}
+
+export interface AssignProxyRequest {
+  proxyUrl?: string | null
+  credentialIds: number[]
+  roundRobin?: boolean
 }
 
 // API Key 信息（GET /keys）
@@ -151,4 +207,58 @@ export interface RequestDetailItem {
   costUsd: number
   creditsUsed: number
   specialSettings: string[]
+}
+
+// ============ 用量统计 ============
+
+export type StatsRange = '24h' | '7d' | '30d' | 'all'
+export type StatsGranularity = 'hour' | 'day'
+
+export interface StatsTimeFilter {
+  range?: StatsRange
+  startDate?: string
+  endDate?: string
+  granularity: StatsGranularity
+}
+
+export interface OverviewStats {
+  todayCalls: number
+  todayInputTokens: number
+  todayOutputTokens: number
+  todayErrors: number
+  todayCredits: number
+  weekCalls: number
+  weekInputTokens: number
+  weekOutputTokens: number
+  weekCredits: number
+  activeClientKeys: number
+  activeCredentials: number
+  totalCredentials?: number
+}
+
+export interface TimeSeriesPoint {
+  ts: string
+  inputTokens: number
+  outputTokens: number
+  cacheCreationTokens: number
+  cacheReadTokens: number
+  calls: number
+  errors: number
+  credits: number
+}
+
+export interface ModelDistribution {
+  model: string
+  calls: number
+  inputTokens: number
+  outputTokens: number
+}
+
+export interface CredentialDistribution {
+  credentialId: number
+  email?: string
+  calls: number
+  inputTokens: number
+  outputTokens: number
+  errors: number
 }

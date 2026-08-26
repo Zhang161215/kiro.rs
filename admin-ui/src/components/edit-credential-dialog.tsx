@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { toast } from 'sonner'
+import { Activity } from 'lucide-react'
 import {
   Dialog,
   DialogContent,
@@ -9,8 +10,10 @@ import {
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { useQuery } from '@tanstack/react-query'
 import { useUpdateCredential } from '@/hooks/use-credentials'
-import type { CredentialStatusItem } from '@/types/api'
+import { checkCredentialProxy, listProxies } from '@/api/credentials'
+import type { CredentialStatusItem, ProxyCheckResponse, ProxyEntry } from '@/types/api'
 import { extractErrorMessage } from '@/lib/utils'
 
 interface EditCredentialDialogProps {
@@ -31,6 +34,9 @@ export function EditCredentialDialog({
   const [proxyUsername, setProxyUsername] = useState('')
   const [proxyPassword, setProxyPassword] = useState('')
 
+  const [checking, setChecking] = useState(false)
+  const [checkResult, setCheckResult] = useState<ProxyCheckResponse | null>(null)
+
   useEffect(() => {
     if (open) {
       setEmail(credential.email ?? '')
@@ -39,24 +45,80 @@ export function EditCredentialDialog({
       setProxyUrl(credential.proxyUrl ?? '')
       setProxyUsername('')
       setProxyPassword('')
+      setCheckResult(null)
     }
   }, [open, credential])
 
   const { mutate, isPending } = useUpdateCredential()
+  // 代理池里的地址，供下拉选择（问题2：从已有代理中选）
+  const { data: poolData } = useQuery({ queryKey: ['proxy-pool'], queryFn: listProxies })
+  const knownProxies = (poolData?.proxies ?? []).filter(p => p.enabled)
+
+  const applyProxyFromPool = (url: string) => {
+    setProxyUrl(url)
+    const hit = findProxyInPool(knownProxies, url)
+    if (hit) {
+      setProxyUsername(hit.username ?? '')
+      setProxyPassword(hit.password ?? '')
+    }
+  }
+
+  // 检测：账密留空且 URL 未改 → 测已保存配置；否则测输入框这一组（未保存也能试）
+  const handleCheckProxy = async () => {
+    setChecking(true)
+    setCheckResult(null)
+    try {
+      const url = proxyUrl.trim()
+      const user = proxyUsername.trim()
+      const pass = proxyPassword.trim()
+      const savedUrl = (credential.proxyUrl ?? '').trim()
+
+      let req: Parameters<typeof checkCredentialProxy>[1]
+      if (!url || (!user && !pass && url === savedUrl)) {
+        req = undefined
+      } else {
+        let u = user
+        let p = pass
+        if (!u && !p) {
+          const hit = findProxyInPool(knownProxies, url)
+          if (hit) {
+            u = hit.username ?? ''
+            p = hit.password ?? ''
+          }
+        }
+        req = {
+          proxyUrl: url,
+          proxyUsername: u || null,
+          proxyPassword: p || null,
+        }
+      }
+      const result = await checkCredentialProxy(credential.id, req)
+      setCheckResult(result)
+    } catch (err) {
+      setCheckResult({ ok: false, error: extractErrorMessage(err) })
+    } finally {
+      setChecking(false)
+    }
+  }
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
+    // 后端约定：空字符串 = 清除该字段，null = 保持原值。
+    // 这几个字段在表单里都回显了当前值，用户清空即表示要清除，所以直接发空串。
     const trim = (s: string) => s.trim()
+    const nextProxyUrl = trim(proxyUrl)
+    const clearingProxy = nextProxyUrl === ''
     mutate(
       {
         id: credential.id,
         req: {
-          email: trim(email) || null,
-          authRegion: trim(authRegion) || null,
-          apiRegion: trim(apiRegion) || null,
-          proxyUrl: trim(proxyUrl) || null,
-          proxyUsername: trim(proxyUsername) || null,
-          proxyPassword: trim(proxyPassword) || null,
+          email: trim(email),
+          authRegion: trim(authRegion),
+          apiRegion: trim(apiRegion),
+          proxyUrl: nextProxyUrl,
+          // 用户名/密码不回显，留空表示沿用原值；但清除代理时要一并清掉
+          proxyUsername: clearingProxy ? '' : trim(proxyUsername) || null,
+          proxyPassword: clearingProxy ? '' : trim(proxyPassword) || null,
         },
       },
       {
@@ -111,21 +173,55 @@ export function EditCredentialDialog({
             <div className="text-[13px] font-medium">代理设置</div>
             <Field
               label="代理 URL"
-              hint="留空表示直连；支持 http(s):// 和 socks5://"
+              hint={
+                knownProxies.length > 0
+                  ? `留空表示直连；可从 ${knownProxies.length} 个已有代理中选择`
+                  : '留空表示直连；支持 http(s):// 和 socks5://'
+              }
             >
-              <Input
-                value={proxyUrl}
-                onChange={(e) => setProxyUrl(e.target.value)}
-                placeholder="socks5://127.0.0.1:1080"
-                disabled={isPending}
-              />
+              <div className="flex gap-2">
+                <Input
+                  value={proxyUrl}
+                  onChange={(e) => applyProxyFromPool(e.target.value)}
+                  placeholder="host:port 或 socks5://127.0.0.1:1080"
+                  list={knownProxies.length > 0 ? 'edit-known-proxies' : undefined}
+                  disabled={isPending}
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={handleCheckProxy}
+                  disabled={isPending || checking}
+                  title="测试连通性：经代理访问 generate_204（不会保存）"
+                >
+                  <Activity className={`h-4 w-4 ${checking ? 'animate-pulse' : ''}`} />
+                </Button>
+              </div>
+              {knownProxies.length > 0 && (
+                <datalist id="edit-known-proxies">
+                  {knownProxies.map((p) => (
+                    <option key={p.id} value={p.url}>
+                      {p.username ? `${p.url} (${p.username})` : p.url}
+                    </option>
+                  ))}
+                </datalist>
+              )}
+              {checkResult && (
+                <p
+                  className={`text-[11px] ${checkResult.ok ? 'text-emerald-600' : 'text-destructive'}`}
+                >
+                  {checkResult.ok
+                    ? `连通，延迟 ${checkResult.latencyMs ?? '?'} ms`
+                    : `不通：${checkResult.error ?? '未知错误'}`}
+                </p>
+              )}
             </Field>
             <div className="grid grid-cols-2 gap-3">
               <Field label="代理用户名">
                 <Input
                   value={proxyUsername}
                   onChange={(e) => setProxyUsername(e.target.value)}
-                  placeholder="可选"
+                  placeholder="留空沿用已保存"
                   disabled={isPending}
                   autoComplete="off"
                 />
@@ -135,14 +231,14 @@ export function EditCredentialDialog({
                   type="password"
                   value={proxyPassword}
                   onChange={(e) => setProxyPassword(e.target.value)}
-                  placeholder="可选"
+                  placeholder="留空沿用已保存"
                   disabled={isPending}
                   autoComplete="new-password"
                 />
               </Field>
             </div>
             <p className="text-[11px] text-muted-foreground">
-              留空用户名/密码表示沿用现有值，提交时会被忽略；如需清空请直接清空 URL。
+              用户名/密码不回显。测试时留空会使用已保存的账密；裸 host:port 带账密按 SOCKS5h（远程 DNS）探测。清空代理请直接清空 URL。
             </p>
           </div>
 
@@ -163,6 +259,23 @@ export function EditCredentialDialog({
       </DialogContent>
     </Dialog>
   )
+}
+
+function proxyHostPort(raw: string): string {
+  const s = raw.trim()
+  if (!s) return ''
+  const afterScheme = s.includes('://') ? s.slice(s.indexOf('://') + 3) : s
+  const afterAuth = afterScheme.includes('@')
+    ? afterScheme.slice(afterScheme.lastIndexOf('@') + 1)
+    : afterScheme
+  return afterAuth.split('/')[0] ?? afterAuth
+}
+
+function findProxyInPool(proxies: ProxyEntry[], url: string): ProxyEntry | undefined {
+  const needle = url.trim()
+  if (!needle) return undefined
+  const hp = proxyHostPort(needle)
+  return proxies.find((p) => p.url === needle || proxyHostPort(p.url) === hp)
 }
 
 function Field({

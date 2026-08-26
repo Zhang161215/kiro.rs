@@ -728,6 +728,7 @@ async fn handle_stream_request(
             return map_provider_error(provider.as_ref(), endpoint, model, request_body, e);
         }
     };
+    let credential_id = api_response.credential_id;
     let _upstream_guard = api_response.upstream_guard;
     let response = api_response.response;
 
@@ -749,6 +750,7 @@ async fn handle_stream_request(
         prompt_hashes,
         block_tokens,
         special_settings,
+        credential_id,
     );
 
     // 返回 SSE 响应
@@ -780,6 +782,7 @@ fn create_sse_stream(
     prompt_hashes: Vec<String>,
     block_tokens: Vec<i32>,
     special_settings: Vec<String>,
+    credential_id: u64,
 ) -> impl Stream<Item = Result<Bytes, Infallible>> {
     // 先发送初始事件
     let initial_stream = stream::iter(
@@ -807,7 +810,7 @@ fn create_sse_stream(
             block_tokens,
             special_settings,
         ),
-        |(
+        move |(
             mut body_stream,
             mut ctx,
             mut decoder,
@@ -919,6 +922,7 @@ fn create_sse_stream(
                                     endpoint,
                                     model: model.clone(),
                                     stream: true,
+                                    credential_id,
                                     prompt_hashes: prompt_hashes.clone(),
                                     block_tokens: block_tokens.clone(),
                                     input_tokens: estimated_input_tokens,
@@ -966,6 +970,7 @@ fn create_sse_stream(
                                     endpoint,
                                     model: model.clone(),
                                     stream: true,
+                                    credential_id,
                                     prompt_hashes: prompt_hashes.clone(),
                                     block_tokens: block_tokens.clone(),
                                     input_tokens: estimated_input_tokens,
@@ -1062,6 +1067,7 @@ async fn handle_non_stream_request(
             return map_provider_error(provider.as_ref(), endpoint, model, request_body, e);
         }
     };
+    let credential_id = api_response.credential_id;
     let _upstream_guard = api_response.upstream_guard;
     let response = api_response.response;
 
@@ -1259,6 +1265,7 @@ async fn handle_non_stream_request(
             endpoint,
             model: model.to_string(),
             stream: false,
+            credential_id,
             prompt_hashes,
             block_tokens,
             input_tokens,
@@ -1574,6 +1581,7 @@ async fn handle_stream_request_buffered(
             return map_provider_error(provider.as_ref(), endpoint, model, request_body, e);
         }
     };
+    let credential_id = api_response.credential_id;
     let _upstream_guard = api_response.upstream_guard;
     let response = api_response.response;
 
@@ -1591,6 +1599,7 @@ async fn handle_stream_request_buffered(
         prompt_hashes,
         block_tokens,
         special_settings,
+        credential_id,
     );
 
     // 返回 SSE 响应
@@ -1613,6 +1622,7 @@ fn create_buffered_sse_stream(
     prompt_hashes: Vec<String>,
     block_tokens: Vec<i32>,
     special_settings: Vec<String>,
+    credential_id: u64,
 ) -> impl Stream<Item = Result<Bytes, Infallible>> {
     let body_stream = response.bytes_stream();
 
@@ -1632,7 +1642,7 @@ fn create_buffered_sse_stream(
             block_tokens,
             special_settings,
         ),
-        |(
+        move |(
             mut body_stream,
             mut ctx,
             mut decoder,
@@ -1742,6 +1752,7 @@ fn create_buffered_sse_stream(
                                         endpoint,
                                         model: model.clone(),
                                         stream: true,
+                                        credential_id,
                                         prompt_hashes: prompt_hashes.clone(),
                                         block_tokens: block_tokens.clone(),
                                         input_tokens: estimated_input_tokens,
@@ -1802,6 +1813,7 @@ fn create_buffered_sse_stream(
                                         endpoint,
                                         model: model.clone(),
                                         stream: true,
+                                        credential_id,
                                         prompt_hashes: prompt_hashes.clone(),
                                         block_tokens: block_tokens.clone(),
                                         input_tokens: estimated_input_tokens,

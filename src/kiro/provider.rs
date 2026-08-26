@@ -8,7 +8,7 @@
 use reqwest::Client;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
 use crate::http_client::{ProxyConfig, build_client};
@@ -26,6 +26,8 @@ pub struct ApiCallResponse {
     /// 流式请求必须持有此 guard 直到流完全消费完毕。
     #[allow(dead_code)]
     pub upstream_guard: Option<UpstreamRequestGuard>,
+    /// 实际打到上游的凭据 ID（用于请求明细 / 概览按凭据分布）
+    pub credential_id: u64,
 }
 
 /// 每个凭据的最大重试次数
@@ -33,6 +35,12 @@ const MAX_RETRIES_PER_CREDENTIAL: usize = 3;
 
 /// 总重试次数硬上限（避免无限重试）
 const MAX_TOTAL_RETRIES: usize = 9;
+
+/// 代理连不上后，暂时绕过它改走直连的时长。
+///
+/// 期满自动再试该代理，因此代理恢复后无需人工干预。取 5 分钟是为了在
+/// 「代理抖动时别反复卡住请求」和「代理恢复后别拖太久才用回来」之间折中。
+const PROXY_FALLBACK_COOLDOWN: Duration = Duration::from_secs(300);
 
 /// Kiro API Provider
 ///
@@ -46,6 +54,8 @@ pub struct KiroProvider {
     /// Client 缓存：key = effective proxy config, value = reqwest::Client
     /// 不同代理配置的凭据使用不同的 Client，共享相同代理的凭据复用 Client
     client_cache: Mutex<HashMap<Option<ProxyConfig>, Client>>,
+    /// 连不上的代理 → 冷却截止时刻。命中的代理会被临时跳过，改走直连
+    proxy_cooldown: Mutex<HashMap<ProxyConfig, Instant>>,
     /// TLS 后端配置
     tls_backend: TlsBackend,
     /// 端点实现注册表（key: endpoint 名称）
@@ -84,15 +94,63 @@ impl KiroProvider {
             token_manager,
             global_proxy: proxy,
             client_cache: Mutex::new(cache),
+            proxy_cooldown: Mutex::new(HashMap::new()),
             tls_backend,
             endpoints,
             default_endpoint,
         }
     }
 
+    /// 该代理是否处于失效冷却期内。顺带清理已到期的条目。
+    fn proxy_in_cooldown(&self, proxy: &ProxyConfig) -> bool {
+        let mut cooldown = self.proxy_cooldown.lock();
+        match cooldown.get(proxy) {
+            Some(until) if *until > Instant::now() => true,
+            Some(_) => {
+                cooldown.remove(proxy);
+                tracing::info!("代理 {} 冷却结束，恢复使用", proxy.url);
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// 记录一次代理连接失败：把该代理放入冷却，后续请求先走直连。
+    ///
+    /// 只在错误确实指向「连不上」时调用，HTTP 状态码错误说明代理本身是通的，不该回退。
+    fn note_proxy_failure(&self, credentials: &KiroCredentials, err: &reqwest::Error) {
+        if !(err.is_connect() || err.is_timeout()) {
+            return;
+        }
+        let Some(proxy) = credentials.effective_proxy(self.global_proxy.as_ref()) else {
+            return;
+        };
+
+        let mut cooldown = self.proxy_cooldown.lock();
+        let fresh = cooldown
+            .insert(proxy.clone(), Instant::now() + PROXY_FALLBACK_COOLDOWN)
+            .is_none();
+        if fresh {
+            tracing::warn!(
+                "代理 {} 连接失败（{}），接下来 {} 秒内改走直连",
+                proxy.url,
+                err,
+                PROXY_FALLBACK_COOLDOWN.as_secs()
+            );
+        }
+    }
+
     /// 根据凭据的代理配置获取（或创建并缓存）对应的 reqwest::Client
+    ///
+    /// 若该代理正处于失效冷却期，则退回直连 Client，保证代理挂掉时服务仍可用。
     fn client_for(&self, credentials: &KiroCredentials) -> anyhow::Result<Client> {
-        let effective = credentials.effective_proxy(self.global_proxy.as_ref());
+        let mut effective = credentials.effective_proxy(self.global_proxy.as_ref());
+        if let Some(proxy) = effective.as_ref()
+            && self.proxy_in_cooldown(proxy)
+        {
+            effective = None;
+        }
+
         let mut cache = self.client_cache.lock();
         if let Some(client) = cache.get(&effective) {
             return Ok(client.clone());
@@ -191,6 +249,8 @@ impl KiroProvider {
                         max_retries,
                         e
                     );
+                    // 连不上代理时把它放进冷却，下一轮重试就会自动走直连
+                    self.note_proxy_failure(&ctx.credentials, &e);
                     last_error = Some(e.into());
                     if attempt + 1 < max_retries {
                         sleep(Self::retry_delay(attempt)).await;
@@ -409,6 +469,8 @@ impl KiroProvider {
                         max_retries,
                         e
                     );
+                    // 连不上代理时把它放进冷却，下一轮重试就会自动走直连
+                    self.note_proxy_failure(&ctx.credentials, &e);
                     last_error = Some(e.into());
                     if sent_attempts < max_retries {
                         sleep(Self::retry_delay(attempt)).await;
@@ -428,6 +490,7 @@ impl KiroProvider {
                 return Ok(ApiCallResponse {
                     response,
                     upstream_guard,
+                    credential_id: ctx.id,
                 });
             }
 

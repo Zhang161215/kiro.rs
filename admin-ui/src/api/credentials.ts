@@ -1,5 +1,4 @@
-import axios from 'axios'
-import { storage } from '@/lib/storage'
+import { api } from '@/api/client'
 import type {
   CredentialsStatusResponse,
   BalanceResponse,
@@ -12,24 +11,14 @@ import type {
   UpdateCredentialRequest,
   AdminKeysResponse,
   SetOverageRequest,
+  ProxyCheckRequest,
+  ProxyCheckResponse,
+  ProxyEntry,
+  ProxyPoolResponse,
+  BatchAddProxyResult,
+  CheckAllProxiesResult,
+  AssignProxyRequest,
 } from '@/types/api'
-
-// 创建 axios 实例
-const api = axios.create({
-  baseURL: '/api/admin',
-  headers: {
-    'Content-Type': 'application/json',
-  },
-})
-
-// 请求拦截器添加 API Key
-api.interceptors.request.use((config) => {
-  const apiKey = storage.getApiKey()
-  if (apiKey) {
-    config.headers['x-api-key'] = apiKey
-  }
-  return config
-})
 
 // 获取所有凭据状态
 export async function getCredentials(): Promise<CredentialsStatusResponse> {
@@ -180,6 +169,61 @@ export async function updateCredential(
   req: UpdateCredentialRequest
 ): Promise<SuccessResponse> {
   const { data } = await api.patch<SuccessResponse>(`/credentials/${id}`, req)
+  return data
+}
+
+// 检测代理连通性。不传 req 时检测该凭据已保存的代理（含用户名/密码）。
+// 编辑页账密不回显：URL 未改且账密留空时不要传 proxyUrl，否则后端会当成无认证 HTTP 代理。
+export async function checkCredentialProxy(
+  id: number,
+  req?: ProxyCheckRequest
+): Promise<ProxyCheckResponse> {
+  const { data } = await api.post<ProxyCheckResponse>(
+    `/credentials/${id}/proxy-check`,
+    req ?? {}
+  )
+  return data
+}
+
+// ============ 代理 IP 池 ============
+
+export async function listProxies(): Promise<ProxyPoolResponse> {
+  const { data } = await api.get<ProxyPoolResponse>('/proxy-pool')
+  return data
+}
+
+export async function addProxy(url: string, label?: string): Promise<ProxyEntry> {
+  const { data } = await api.post<ProxyEntry>('/proxy-pool', { url, label })
+  return data
+}
+
+export async function batchAddProxies(urls: string[]): Promise<BatchAddProxyResult> {
+  const { data } = await api.post<BatchAddProxyResult>('/proxy-pool/batch', { urls })
+  return data
+}
+
+export async function deleteProxy(id: number): Promise<SuccessResponse> {
+  const { data } = await api.delete<SuccessResponse>(`/proxy-pool/${id}`)
+  return data
+}
+
+export async function setProxyEnabled(id: number, enabled: boolean): Promise<SuccessResponse> {
+  const { data } = await api.post<SuccessResponse>(`/proxy-pool/${id}/enabled`, { enabled })
+  return data
+}
+
+export async function checkPoolProxy(id: number): Promise<ProxyEntry> {
+  const { data } = await api.post<ProxyEntry>(`/proxy-pool/${id}/check`)
+  return data
+}
+
+export async function checkAllPoolProxies(): Promise<CheckAllProxiesResult> {
+  const { data } = await api.post<CheckAllProxiesResult>('/proxy-pool/check-all')
+  return data
+}
+
+export async function assignProxy(req: AssignProxyRequest): Promise<{ assigned: number; proxies?: number }> {
+  const { data } = await api.post<{ assigned: number; proxies?: number }>('/proxy-pool/assign', req)
   return data
 }
 

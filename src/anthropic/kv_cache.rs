@@ -47,6 +47,8 @@ pub struct KvCacheRecordInput {
     pub endpoint: &'static str,
     pub model: String,
     pub stream: bool,
+    /// 实际打到上游的凭据；0 表示未知（旧记录 / 调用方未传入）
+    pub credential_id: u64,
     /// 归一化后的 prompt block hash 列表（system/tools/messages）
     pub prompt_hashes: Vec<String>,
     /// 与 prompt_hashes 对齐的每个 block 的 tokens（本地估算，可复现）
@@ -130,6 +132,10 @@ pub fn get_kv_cache_ttl_secs() -> i64 {
     KV_CONFIG.get().map(|l| l.lock().1).unwrap_or(3600)
 }
 
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct KvCacheRecord {
@@ -137,6 +143,8 @@ struct KvCacheRecord {
     request_id: String,
     endpoint: String,
     model: String,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    credential_id: u64,
     stream: bool,
     cache_key: String,
     cache_hit: bool,
@@ -381,6 +389,7 @@ fn record_impl(
         request_id: Uuid::new_v4().to_string(),
         endpoint: input.endpoint.to_string(),
         model: input.model,
+        credential_id: input.credential_id,
         stream: input.stream,
         cache_key: cache_key.clone(),
         cache_hit,

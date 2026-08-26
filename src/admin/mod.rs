@@ -19,8 +19,10 @@
 mod error;
 mod handlers;
 mod middleware;
+mod proxy_pool;
 mod router;
 mod service;
+mod usage_stats;
 pub mod types;
 
 pub use middleware::AdminState;

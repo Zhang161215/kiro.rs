@@ -30,7 +30,8 @@ export function useCredentials() {
   return useQuery({
     queryKey: ['credentials'],
     queryFn: getCredentials,
-    refetchInterval: 30000, // 每 30 秒刷新一次
+    refetchInterval: 30000,
+    retry: 1,
   })
 }
 
@@ -192,6 +193,7 @@ export function useClearRequestDetails() {
     mutationFn: clearRequestDetails,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['requestDetails'] })
+      queryClient.invalidateQueries({ queryKey: ['stats'] })
     },
   })
 }

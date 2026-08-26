@@ -259,15 +259,23 @@ impl KiroCredentials {
     pub fn effective_proxy(&self, global_proxy: Option<&ProxyConfig>) -> Option<ProxyConfig> {
         match self.proxy_url.as_deref() {
             Some(url) if url.eq_ignore_ascii_case(Self::PROXY_DIRECT) => None,
-            Some(url) => {
-                let mut proxy = ProxyConfig::new(url);
-                if let (Some(username), Some(password)) =
-                    (&self.proxy_username, &self.proxy_password)
-                {
-                    proxy = proxy.with_auth(username, password);
-                }
-                Some(proxy)
-            }
+            Some(url) => Some(
+                ProxyConfig::from_url_and_auth(
+                    url,
+                    self.proxy_username.clone(),
+                    self.proxy_password.clone(),
+                )
+                .unwrap_or_else(|_| {
+                    let mut proxy = ProxyConfig::new(url);
+                    if let Some(username) = &self.proxy_username {
+                        proxy = proxy.with_auth(
+                            username,
+                            self.proxy_password.as_deref().unwrap_or(""),
+                        );
+                    }
+                    proxy
+                }),
+            ),
             None => global_proxy.cloned(),
         }
     }
@@ -909,6 +917,18 @@ mod tests {
         let result = creds.effective_proxy(Some(&global));
         let expected = ProxyConfig::new("http://proxy:3128").with_auth("user", "pass");
         assert_eq!(result, Some(expected));
+    }
+
+    #[test]
+    fn test_effective_proxy_kam_host_port_with_auth_is_socks5() {
+        let mut creds = KiroCredentials::default();
+        creds.proxy_url = Some("204.1.74.19:7069".to_string());
+        creds.proxy_username = Some("user".to_string());
+        creds.proxy_password = Some("pass".to_string());
+        let result = creds.effective_proxy(None).unwrap();
+        assert_eq!(result.url, "socks5h://204.1.74.19:7069");
+        assert_eq!(result.username.as_deref(), Some("user"));
+        assert_eq!(result.password.as_deref(), Some("pass"));
     }
 
     #[test]

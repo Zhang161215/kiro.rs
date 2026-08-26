@@ -2376,6 +2376,39 @@ impl MultiTokenManager {
         Ok(())
     }
 
+    /// 取指定凭据的有效代理配置（含已保存的用户名 / 密码）。
+    ///
+    /// 快照结构只暴露 `proxy_url`，探测代理时需要完整的认证信息，故单独提供。
+    pub fn effective_proxy_for(
+        &self,
+        id: u64,
+        global_proxy: Option<&ProxyConfig>,
+    ) -> anyhow::Result<Option<ProxyConfig>> {
+        let entries = self.entries.lock();
+        let entry = entries
+            .iter()
+            .find(|e| e.id == id)
+            .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
+        Ok(entry.credentials.effective_proxy(global_proxy))
+    }
+
+    /// 凭据上保存的原始代理字段（URL / 用户名 / 密码），探测时用来补账密。
+    pub fn proxy_fields_for(
+        &self,
+        id: u64,
+    ) -> anyhow::Result<(Option<String>, Option<String>, Option<String>)> {
+        let entries = self.entries.lock();
+        let entry = entries
+            .iter()
+            .find(|e| e.id == id)
+            .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
+        Ok((
+            entry.credentials.proxy_url.clone(),
+            entry.credentials.proxy_username.clone(),
+            entry.credentials.proxy_password.clone(),
+        ))
+    }
+
     /// 设置凭据优先级（Admin API）
     ///
     /// 修改优先级后会立即按新优先级重新选择当前凭据。
