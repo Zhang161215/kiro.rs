@@ -95,8 +95,8 @@ jobs:
           push: true
           provenance: false
           tags: |
-            ghcr.io/${{ steps.version.outputs.owner }}/kiro-rs:${{ steps.version.outputs.version }}-amd64
-            ghcr.io/${{ steps.version.outputs.owner }}/kiro-rs:${{ steps.version.outputs.version }}
+            ghcr.io/${{ steps.version.outputs.owner }}/kiro-rs-main:${{ steps.version.outputs.version }}-amd64
+            ghcr.io/${{ steps.version.outputs.owner }}/kiro-rs-main:${{ steps.version.outputs.version }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.description=Kiro.rs Docker Image
